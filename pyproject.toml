@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "parakeet"
+version = "0.1.0"
+description = "Streaming ASR."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Odunola" }]
+dependencies = [
+  "torch>=2.9.1",
+  "pydantic>=2.12.5",
+  "sentencepiece>=0.2.1",
+  "torchcodec>=0.9.1",
+  "torchaudio>=2.9.1",
+  "librosa>=0.11.0",
+  "huggingface-hub>=1.2.3",
+  "safetensors>=0.7.0",
+  "soundfile>=0.13.1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pre-commit",
+  "ruff",
+  "isort",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["parakeet-streaming"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
