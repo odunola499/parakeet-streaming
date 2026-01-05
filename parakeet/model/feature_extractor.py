@@ -1,8 +1,9 @@
 import math
 
-import numpy as np
 import librosa
 import torch
+from typing import List
+import numpy as np
 
 
 class ParakeetFeatureExtractor:
@@ -63,15 +64,12 @@ class ParakeetFeatureExtractor:
         pad_amount = self.n_fft
         return (seq_len + pad_amount - self.n_fft) // self.hop_length
 
-    def _compute_features(self, waveform: np.ndarray, seq_len_time: int):
+    def _compute_features(self, waveform: List[np.ndarray], seq_len_time: int):
         x = torch.tensor(waveform, dtype=torch.float32)
 
         x = x + torch.randn_like(x) * self.dither
-        x = torch.cat((x[:1], x[1:] - self.preemph * x[:-1]))
-
-        if seq_len_time < x.shape[0]:
-            timemask = torch.arange(x.shape[0]) < seq_len_time
-            x = x.masked_fill(~timemask, 0.0)
+        right = x[:, 1:] - self.preemph * x[:, :-1]
+        x = torch.cat((x[:, :1], right), dim=-1)
 
         stft = torch.stft(
             x,
@@ -93,25 +91,14 @@ class ParakeetFeatureExtractor:
         if self.log:
             mel = torch.log(mel + self.log_zero_guard_value)
 
-        seq_len_frames = self._get_seq_len(seq_len_time)
-
-        max_len = mel.shape[1]
-        if seq_len_frames < max_len:
-            mask = torch.arange(max_len) >= seq_len_frames
-            mel = mel.masked_fill(mask.unsqueeze(0), self.pad_value)
-
         return mel
 
     def __call__(
         self,
         audio,
-        lengths=None,
         return_tensors: str | None = None,
         padding: bool = True,
     ):
-        if isinstance(audio, torch.Tensor):
-            audio = audio.detach().cpu().numpy()
-
         if isinstance(audio, np.ndarray):
             if audio.ndim == 1:
                 audio_list = [audio]
@@ -124,48 +111,15 @@ class ParakeetFeatureExtractor:
         else:
             raise ValueError("audio must be a numpy array or a list of numpy arrays")
 
-        if lengths is None:
-            lengths = [a.shape[-1] for a in audio_list]
-        elif isinstance(lengths, torch.Tensor):
-            lengths = lengths.tolist()
-        else:
-            lengths = list(lengths)
+        features = self._compute_features(audio_list, audio_list[0].shape[-1])
 
-        if len(lengths) != len(audio_list):
-            raise ValueError("lengths must match the number of audio samples")
-
-        features = [
-            self._compute_features(a if a.ndim == 1 else a.mean(axis=0), int(seq_len))
-            for a, seq_len in zip(audio_list, lengths, strict=False)
-        ]
-
-        if padding or return_tensors is not None:
-            max_len = max(f.shape[1] for f in features)
-            padded = []
-            for f in features:
-                if f.shape[1] < max_len:
-                    pad = max_len - f.shape[1]
-                    f = torch.nn.functional.pad(f, (0, pad), value=self.pad_value)
-                padded.append(f)
-            features = padded
-
-        if return_tensors is None:
-            return {"input_features": [f.numpy().astype(np.float32) for f in features]}
-
-        if return_tensors not in {"np", "pt"}:
-            raise ValueError("return_tensors must be 'np' or 'pt'")
-
-        if return_tensors == "np":
-            stacked = np.stack([f.numpy().astype(np.float32) for f in features], axis=0)
-            return {"input_features": stacked}
-
-        stacked = torch.stack(features, dim=0)
-        return {"input_features": stacked}
+        return {"input_features": features}
 
 
 if __name__ == "__main__":
     import numpy as np
+
     feature_extractor = ParakeetFeatureExtractor()
-    array = np.random.randn(4, 32000)
+    array = np.random.randn(32000)
     print(array.shape)
-    print(feature_extractor(array))
+    print(feature_extractor([array] * 2)["input_features"].shape)

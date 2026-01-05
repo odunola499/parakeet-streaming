@@ -19,6 +19,7 @@ dependencies = [
   "huggingface-hub>=1.2.3",
   "safetensors>=0.7.0",
   "soundfile>=0.13.1",
+  "trio>=0.32.0",
 ]
 
 [project.optional-dependencies]
@@ -29,7 +30,7 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["parakeet-streaming"]
+packages = ["parakeet"]
 
 [tool.ruff]
 line-length = 88

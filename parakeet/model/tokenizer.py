@@ -3,7 +3,6 @@ from typing import List, Union
 import sentencepiece as spm
 
 
-
 class ParakeetTokenizer:
     def __init__(self, tokenizer_path: str):
         if tokenizer_path is None:

@@ -1,29 +1,26 @@
 import torch
 from torch import nn, Tensor
 
+
 class Predictor(nn.Module):
     def __init__(
-            self,
-            pred_dim:int,
-            hidden_dim:int,
-            num_layers:int,
-            vocab_size:int
+        self, pred_dim: int, hidden_dim: int, num_layers: int, vocab_size: int
     ):
         super(Predictor, self).__init__()
         self.prediction = nn.ModuleDict(
             {
-                "embed":nn.Embedding(vocab_size + 1, pred_dim, padding_idx = vocab_size),
-                "dec_rnn":nn.LSTM(
+                "embed": nn.Embedding(vocab_size + 1, pred_dim, padding_idx=vocab_size),
+                "dec_rnn": nn.LSTM(
                     input_size=pred_dim,
                     hidden_size=hidden_dim,
                     num_layers=num_layers,
-                )
+                ),
             }
         )
         self.pred_dim = pred_dim
         self.num_layers = num_layers
 
-    def init_state(self, batch_size:int):
+    def init_state(self, batch_size: int):
         param = next(self.parameters())
         device = param.device
         dtype = param.dtype
@@ -41,14 +38,16 @@ class Predictor(nn.Module):
                 self.pred_dim,
                 device=device,
                 dtype=dtype,
-            )
+            ),
         )
 
-    def forward(self, targets:Tensor, target_length:Tensor, states = None):
+    def forward(self, targets: Tensor, target_length: Tensor, states=None):
         y = self.prediction["embed"](targets)
 
         bsz, seq_len, hidden = y.shape
-        start = torch.zeros((bsz, 1, hidden), dtype=targets.dtype, device=targets.device)
+        start = torch.zeros(
+            (bsz, 1, hidden), dtype=targets.dtype, device=targets.device
+        )
         y = torch.concat([start, y], dim=1).contiguous()
 
         if states is None:
@@ -56,10 +55,10 @@ class Predictor(nn.Module):
 
         y = y.transpose(0, 1)
         g, hidden = self.prediction["dec_rnn"](y, states)
-        g = g.transpose(0, 1).transpose(1,2)
+        g = g.transpose(0, 1).transpose(1, 2)
         return g, target_length, hidden
 
-    def step(self, input_ids: Tensor, state:Tensor = None):
+    def step(self, input_ids: Tensor, state: Tensor = None):
         if input_ids.dim() == 1:
             input_ids = input_ids.unsqueeze(1)
         if input_ids.dim() != 2:

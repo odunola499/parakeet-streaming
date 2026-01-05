@@ -1,10 +1,10 @@
 import math
-from typing import TYPE_CHECKING
 
 import torch
 from torch import Tensor, nn
 
 from parakeet.model.convolution import CausalConv2D
+
 
 def calc_length(lengths, all_paddings, kernel_size, stride, repeat_num=1):
     add_pad: float = all_paddings - kernel_size
@@ -60,19 +60,18 @@ class MaskedConvSequential(nn.Sequential):
 class ConvSubsampling(nn.Module):
     def __init__(
         self,
-        hidden_size:int,
-        subsampling_conv_channels:int,
-        feat_in:int,
-        subsampling_factor:int,
+        hidden_size: int,
+        subsampling_conv_channels: int,
+        feat_in: int,
+        subsampling_factor: int,
         stride: int = 2,
         kernel_size: int = 3,
-
     ):
         super().__init__()
         self._conv_channels = subsampling_conv_channels
         self.feat_in = feat_in
         self.feat_out = -1
-        conv_channels =subsampling_conv_channels
+        conv_channels = subsampling_conv_channels
 
         self.sampling_num = int(math.log(subsampling_factor, 2))
         self.subsampling_factor = subsampling_factor

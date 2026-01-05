@@ -5,6 +5,7 @@ from typing import List, Union
 import torch
 from torch import Tensor
 
+
 @dataclass
 class Hypothesis:
     tokens: Tensor
@@ -17,6 +18,7 @@ class Hypothesis:
 class GenerationOutput:
     ids: Tensor
     labels: Union[List[str], List[int]]
+
 
 class GenerationMixin(ABC):
     @abstractmethod
