@@ -98,10 +98,9 @@ class Parakeet(nn.Module, GenerationMixin):
         return self.decoder
 
     @classmethod
-    def from_pretrained(
-        cls,
-    ):
-        config = ModelConfig()
+    def from_pretrained(cls, config: ModelConfig = None):
+        if not config:
+            config = ModelConfig()
 
         repo_id = "odunola/parakeet-EOU"
         model_path = hf_hub_download(repo_id=repo_id, filename="model.safetensors")

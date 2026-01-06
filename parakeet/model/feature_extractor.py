@@ -98,6 +98,7 @@ class ParakeetFeatureExtractor:
         audio,
         return_tensors: str | None = None,
         padding: bool = True,
+        pad_to: int = None,
     ):
         if isinstance(audio, np.ndarray):
             if audio.ndim == 1:
@@ -112,6 +113,11 @@ class ParakeetFeatureExtractor:
             raise ValueError("audio must be a numpy array or a list of numpy arrays")
 
         features = self._compute_features(audio_list, audio_list[0].shape[-1])
+        if pad_to:
+            time_length = features.shape[-1]
+            assert time_length <= pad_to, "time_length must be less than pad_to"
+            remains = pad_to - time_length
+            features = torch.nn.functional.pad(features, (0, remains))
 
         return {"input_features": features}
 
@@ -120,6 +126,6 @@ if __name__ == "__main__":
     import numpy as np
 
     feature_extractor = ParakeetFeatureExtractor()
-    array = np.random.randn(32000)
+    array = np.random.randn(2000)
     print(array.shape)
     print(feature_extractor([array] * 2)["input_features"].shape)

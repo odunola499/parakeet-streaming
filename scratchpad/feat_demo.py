@@ -23,12 +23,12 @@ def build_models(device: torch.device):
 
 
 def main():
-    path = "/Users/odunolajenrola/Documents/GitHub/parakeet-streaming/fugitivepieces_03_pope_64kb.mp3"
+    path = "/Users/odunolajenrola/Documents/GitHub/parakeet-streaming/test.mp3"
     device_str = "cpu"
     chunk_size = 0
     check = True
     decode = True
-    max_seconds = 10.0
+    max_seconds = 100
 
     device = torch.device(device_str)
     offline, streaming = build_models(device)
@@ -77,7 +77,6 @@ def main():
             chunk_len = (pre_len - start).clamp(min=0, max=chunk_size)
             if (chunk_len == 0).all():
                 break
-            print(chunk.shape)
             chunk_out, state = streaming.encoder.forward_streaming(
                 chunk, state, length=chunk_len, bypass_pre_encode=True
             )
@@ -91,6 +90,11 @@ def main():
                     )
                     if hyp.numel() > 0:
                         token_chunks.append(hyp)
+
+            if token_chunks:
+                ids = torch.cat(token_chunks, dim=-1)
+                text = tokenizer.decode(ids.to("cpu").tolist())
+                print("streaming_text:", text)
 
         stream_enc = torch.cat(stream_chunks, dim=2)
 
