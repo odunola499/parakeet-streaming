@@ -2,11 +2,11 @@ import librosa
 import numpy as np
 import torch
 
-from parakeet.model.config import ModelConfig
 from parakeet.model.modeling_parakeet import Parakeet
 
 path = "/Users/odunolajenrola/Documents/GitHub/parakeet-streaming/test.mp3"
 device_str = "cpu"
+size = "small"
 decode = True
 max_seconds = 2
 
@@ -75,9 +75,7 @@ class PreEncodeStreamer:
 
 def main():
     device = torch.device(device_str)
-    cfg = ModelConfig()
-    cfg.stream = True
-    model = Parakeet.from_pretrained(cfg).to(device)
+    model = Parakeet.from_pretrained(size).to(device)
     model.eval()
 
     array, sr = librosa.load(path, sr=16000, duration=max_seconds)
@@ -130,7 +128,6 @@ def main():
             )
             chunk = enc_buffer[:, :take, :]
             enc_buffer = enc_buffer[:, take:, :]
-            print(chunk.shape)
             length = torch.full(
                 (chunk.size(0),), take, dtype=torch.int64, device=device
             )
