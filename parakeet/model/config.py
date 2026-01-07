@@ -29,4 +29,4 @@ class LargeModelConfig(ModelConfig):
     enc_hidden_layers: int = 24
     enc_att_context_size: tuple[int, int] = (70, 13)
     pred_hidden_layers: int = 2
-    vocab_size: int = 1025
+    vocab_size: int = 1024
