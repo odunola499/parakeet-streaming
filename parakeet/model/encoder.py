@@ -155,37 +155,6 @@ class ConformerEncoder(nn.Module):
         self.last_channel_num = last_channel_num
         self.last_time_num = last_time_num
 
-    def _create_masks(self, padding_length, max_audio_length, device):
-        att_context_size = self.att_context_size
-        attn_mask = torch.ones(
-            1, max_audio_length, max_audio_length, device=device, dtype=torch.bool
-        )
-        chunk_size = att_context_size[1] + 1
-        left_chunks_num = att_context_size[0] // chunk_size
-        chunk_idx = torch.arange(0, max_audio_length, device=device, dtype=torch.int)
-        chunk_idx = torch.div(chunk_idx, chunk_size, rounding_mode="trunc")
-        diff_chunks = chunk_idx.unsqueeze(1) - chunk_idx.unsqueeze(0)
-        chunked_limited_mask = torch.logical_and(
-            torch.le(diff_chunks, left_chunks_num), torch.ge(diff_chunks, 0)
-        )
-        att_mask = torch.logical_and(attn_mask, chunked_limited_mask.unsqueeze(0))
-
-        pad_mask = torch.arange(0, max_audio_length, device=device).expand(
-            padding_length.size(0), -1
-        ) < padding_length.unsqueeze(-1)
-
-        pad_mask_for_att_mask = pad_mask.unsqueeze(1).repeat([1, max_audio_length, 1])
-        pad_mask_for_att_mask = torch.logical_and(
-            pad_mask_for_att_mask, pad_mask_for_att_mask.transpose(1, 2)
-        )
-        att_mask = torch.logical_and(
-            pad_mask_for_att_mask, att_mask.to(pad_mask_for_att_mask.device)
-        )
-        att_mask = ~att_mask
-
-        pad_mask = ~pad_mask
-        return pad_mask, att_mask
-
     def init_streaming_state(
         self, batch_size: int = 1, device: torch.device | None = None
     ):
@@ -312,26 +281,9 @@ class ConformerEncoder(nn.Module):
         return x, state
 
     def forward(self, x: Tensor, length: Tensor = None, cache: ModelCache = None):
-        if cache is None:
-            assert self.stream is False, "Cache is needed for streaming"
-        if length is None:
-            length = x.new_full(
-                (x.size(0),), x.size(-1), dtype=torch.int64, device=x.device
-            )
-        x = x.transpose(1, 2)
-        x, length = self.pre_encode(x, length)
-        x, pos_emb = self.pos_enc(x)
-
-        pad_mask, att_mask = self._create_masks(
-            padding_length=length, max_audio_length=x.shape[1], device=x.device
+        raise RuntimeError(
+            "Offline encoder forward is removed. Use forward_streaming instead."
         )
-
-        for idx, layer in enumerate(self.layers):
-            x = layer(
-                x, pos_emb=pos_emb, pad_mask=pad_mask, attn_mask=att_mask, cache=cache
-            )
-        x = x.transpose(1, 2)
-        return x
 
 
 if __name__ == "__main__":

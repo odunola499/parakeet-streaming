@@ -65,7 +65,8 @@ class ParakeetFeatureExtractor:
         return (seq_len + pad_amount - self.n_fft) // self.hop_length
 
     def _compute_features(self, waveform: List[np.ndarray], seq_len_time: int):
-        x = torch.tensor(waveform, dtype=torch.float32)
+        waveform = np.stack(waveform, axis=0)
+        x = torch.from_numpy(waveform).to(dtype=torch.float32)
 
         x = x + torch.randn_like(x) * self.dither
         right = x[:, 1:] - self.preemph * x[:, :-1]

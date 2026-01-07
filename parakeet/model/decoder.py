@@ -58,17 +58,9 @@ class Predictor(nn.Module):
         g = g.transpose(0, 1).transpose(1, 2)
         return g, target_length, hidden
 
-    def step(self, input_ids: Tensor, state: Tensor = None):
-        if input_ids.dim() == 1:
-            input_ids = input_ids.unsqueeze(1)
-        if input_ids.dim() != 2:
-            raise ValueError("input_ids must have shape (B,) or (B, 1)")
-
+    def step(self, input_ids: Tensor, state: tuple[Tensor, Tensor] | Tensor):
+        input_ids = input_ids.reshape(-1, 1)
         y = self.prediction["embed"](input_ids)
-
-        if state is None:
-            state = self.init_state(y.size(0))
-
         y = y.transpose(0, 1)
         g, hidden = self.prediction["dec_rnn"](y, state)
         g = g.transpose(0, 1)
@@ -135,3 +127,9 @@ class Joiner(nn.Module):
         decoder_output = self.pred(predictor_output).unsqueeze(1)
         joined = encoder_output + decoder_output
         return self.joint_net(joined)
+
+    def forward_frame(self, encoder_frame: Tensor, predictor_out: Tensor) -> Tensor:
+        encoder_proj = self.enc(encoder_frame)
+        predictor_proj = self.pred(predictor_out).unsqueeze(1)
+        joined = encoder_proj + predictor_proj
+        return self.joint_net(joined).squeeze(1)

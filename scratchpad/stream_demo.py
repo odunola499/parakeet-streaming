@@ -8,7 +8,7 @@ from parakeet.model.modeling_parakeet import Parakeet
 path = "/Users/odunolajenrola/Documents/GitHub/parakeet-streaming/test.mp3"
 device_str = "cpu"
 decode = True
-max_seconds = 100
+max_seconds = 2
 
 
 class StreamingFeatureExtractor:
@@ -86,7 +86,7 @@ def main():
     feature_extractor = model.get_feature_extractor()
     predictor = model.get_predictor()
     tokenizer = model.get_tokenizer()
-    blank_id = model.get_blank_id()
+    blank_id = model.blank_id
 
     subsampling_factor = model.config.subsampling_factor
     lookahead = model.encoder.att_context_size[1]
@@ -130,6 +130,7 @@ def main():
             )
             chunk = enc_buffer[:, :take, :]
             enc_buffer = enc_buffer[:, take:, :]
+            print(chunk.shape)
             length = torch.full(
                 (chunk.size(0),), take, dtype=torch.int64, device=device
             )

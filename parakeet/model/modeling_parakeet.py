@@ -1,13 +1,36 @@
+from typing import Literal
 import torch
 from torch import nn, Tensor
 from huggingface_hub import hf_hub_download
 from safetensors.torch import safe_open
-from parakeet.model.config import ModelConfig
+from parakeet.model.config import ModelConfig, LargeModelConfig
 from parakeet.model.encoder import ConformerEncoder
 from parakeet.model.decoder import Predictor, Joiner
 from parakeet.model.tokenizer import ParakeetTokenizer
 from parakeet.model.feature_extractor import ParakeetFeatureExtractor
 from parakeet.model.generation import GenerationMixin
+
+WEIGHTS_MAP = {
+    "large": "odunola/Nemo-Speech-Large",
+    "small": "odunola/parakeet-EOU",
+}
+CONFIG_MAP = {
+    "large": LargeModelConfig,
+    "small": ModelConfig,
+}
+
+
+def remap_streaming_modules(state_dict: dict):
+    remapped = {}
+    for key, value in state_dict.items():
+        if key.startswith("decoder."):
+            remapped_key = "predictor." + key[len("decoder.") :]
+        elif key.startswith("joint."):
+            remapped_key = "joiner." + key[len("joint.") :]
+        else:
+            remapped_key = key
+        remapped[remapped_key] = value
+    return remapped
 
 
 def remap_weights(state_dict: dict):
@@ -34,6 +57,7 @@ def remap_weights(state_dict: dict):
             ]
         )
         new_state_dict[f"encoder.layers.{layer_idx}.self_attn.qkv.weight"] = comb_weight
+    new_state_dict = remap_streaming_modules(new_state_dict)
     return new_state_dict
 
 
@@ -57,14 +81,14 @@ class Parakeet(nn.Module, GenerationMixin):
             stream=config.stream,
         )
 
-        self.decoder = Predictor(
+        self.predictor = Predictor(
             pred_dim=config.pred_hidden_dim,
             hidden_dim=config.pred_hidden_dim,
             num_layers=config.pred_hidden_layers,
             vocab_size=config.vocab_size,
         )
 
-        self.joint = Joiner(
+        self.joiner = Joiner(
             encoder_dim=config.enc_hidden_dim,
             pred_dim=config.pred_hidden_dim,
             joint_dim=config.joint_hidden_dim,
@@ -80,10 +104,10 @@ class Parakeet(nn.Module, GenerationMixin):
         audio_lens: Tensor,
         label_lens: Tensor | None = None,
     ):
-        encoder_outputs = self.encoder(audio_features, audio_lens)
-        predictor_outputs, label_lens, _ = self.decoder(labels, label_lens)
-        logits = self.joint(encoder_outputs, predictor_outputs)
-        return {"loss": None, "logits": logits}
+        raise RuntimeError(
+            "Offline forward is removed. Use encoder.forward_streaming with "
+            "predictor.step and joiner.forward_frame."
+        )
 
     def get_feature_extractor(self):
         return self._feature_extractor
@@ -92,17 +116,20 @@ class Parakeet(nn.Module, GenerationMixin):
         return self._tokenizer
 
     def get_joiner(self):
-        return self.joint
+        return self.joiner
 
     def get_predictor(self):
-        return self.decoder
+        return self.predictor
 
     @classmethod
-    def from_pretrained(cls, config: ModelConfig = None):
-        if not config:
-            config = ModelConfig()
+    def from_pretrained(cls, size: Literal["small", "large"] | ModelConfig = "small"):
+        if isinstance(size, ModelConfig):
+            config = size
+            size = "large" if isinstance(config, LargeModelConfig) else "small"
+        else:
+            config = CONFIG_MAP[size]()
 
-        repo_id = "odunola/parakeet-EOU"
+        repo_id = WEIGHTS_MAP[size]
         model_path = hf_hub_download(repo_id=repo_id, filename="model.safetensors")
         tokenizer_path = hf_hub_download(repo_id=repo_id, filename="tokenizer.model")
 
@@ -119,19 +146,3 @@ class Parakeet(nn.Module, GenerationMixin):
         model._tokenizer = ParakeetTokenizer(tokenizer_path)
 
         return model
-
-
-if __name__ == "__main__":
-    config = ModelConfig()
-    model = Parakeet.from_pretrained()
-
-    import librosa
-    from time import time
-
-    path = "/Users/odunolajenrola/Documents/GitHub/parakeet-streaming/test.mp3"
-    array, sr = librosa.load(path, sr=16000)
-    start = time()
-    output = model._greedy_decode(array)
-    end = time()
-    print(end - start)
-    print(output)
