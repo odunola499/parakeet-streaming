@@ -85,7 +85,7 @@ class ConformerAttention(nn.Module):
     def forward(
         self, x: Tensor, pos_emb: Tensor, attn_mask: Tensor, cache: ModelCache = None
     ):
-        B, T = x.shape[:2]
+        B = x.shape[0]
         pos_emb_B = pos_emb.shape[0]
         attn_mask = attn_mask.bool()
         if attn_mask.ndim == 3:
@@ -115,11 +115,6 @@ class ConformerAttention(nn.Module):
         output = sdpa_attention_forward(
             query=q_with_bias_u, key=key, value=value, attention_mask=matrix_bd
         )
-
-        all_masked_rows = torch.all(attn_mask, dim=-1).unsqueeze(-1).unsqueeze(-1)
-        if all_masked_rows.ndim == 3:
-            all_masked_rows = all_masked_rows.squeeze(1)
-        # output = output.masked_fill(all_masked_rows, 0.0)
 
         output = output.reshape(B, -1, self.num_heads * self.d_k)
         output = self.linear_out(output)

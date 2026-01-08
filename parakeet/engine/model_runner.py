@@ -22,23 +22,17 @@ class DecodeResult:
 
 
 class ModelRunner:
-    """Runs the model in three stages: pre-encode, encode, decode."""
-
     def __init__(self, config: Config, device: torch.device, scheduler: Scheduler):
         self.config = config
         self.device = device
         self.scheduler = scheduler
 
         self._init_model()
-        self._init_state_pool(
-            pool_size=config.max_num_streams,
-            max_seq_len=config.max_seq_len,
-        )
+        self._init_state_pool(pool_size=config.max_num_streams)
 
         self._stop_event = threading.Event()
         self._threads: list[threading.Thread] = []
         self._results_queue: queue.Queue[DecodeResult] = queue.Queue()
-        print("Initialized model runner")
 
     def _init_model(self) -> None:
         self.model = Parakeet.from_pretrained(self.config.size).to(self.device)
@@ -67,11 +61,9 @@ class ModelRunner:
         self._feature_extractor_cls = type(self.model.get_feature_extractor())
         self._samples_per_frame = self._feature_extractor_cls().hop_length
 
-    def _init_state_pool(self, pool_size: int, max_seq_len: int) -> None:
+    def _init_state_pool(self, pool_size: int) -> None:
         self._state_pool: list = []
         self._free_states: deque = deque()
-
-        self._max_cache_len = min(max_seq_len, self._attn_cache_len)
 
         for _ in range(pool_size):
             state = self.encoder.init_streaming_state(batch_size=1, device=self.device)
@@ -262,23 +254,29 @@ class ModelRunner:
         for seq in self.scheduler.active_sequences():
             if seq.status == SequenceStatus.FINISHED:
                 continue
-            with seq.lock:
-                if seq.has_pending_audio():
-                    self._run_pre_encode(seq)
+            if seq.has_pending_audio():
+                self._run_pre_encode(seq)
 
     def _run_pre_encode(self, seq: Sequence) -> None:
-        while seq.raw_queue:
-            samples, is_final = seq.raw_queue.popleft()
+        while True:
+            with seq.lock:
+                if not seq.raw_queue or seq.feature_extractor is None:
+                    return
+                samples, is_final = seq.raw_queue.popleft()
+                pre_encode_cache = seq.pre_encode_cache
+                drop_extra_pre_encoded = seq.drop_extra_pre_encoded
+                pre_encode_cache_size = seq.pre_encode_cache_size
+
             feats = seq.feature_extractor.push(samples, final=is_final)
             if feats is None:
                 continue
             feats = feats.to(self.device)
 
-            if seq.pre_encode_cache is None:
+            if pre_encode_cache is None:
                 feats_in = feats
                 has_cache = False
             else:
-                feats_in = torch.cat([seq.pre_encode_cache, feats], dim=-1)
+                feats_in = torch.cat([pre_encode_cache, feats], dim=-1)
                 has_cache = True
 
             lengths = torch.full(
@@ -288,17 +286,21 @@ class ModelRunner:
                 device=self.device,
             )
             pre_encoded, _ = self.pre_encoder(feats_in.transpose(1, 2), lengths)
-            if has_cache and seq.drop_extra_pre_encoded > 0:
-                pre_encoded = pre_encoded[:, seq.drop_extra_pre_encoded :, :]
-            if seq.pre_encode_cache_size > 0:
-                if feats_in.size(-1) >= seq.pre_encode_cache_size:
-                    seq.pre_encode_cache = feats_in[
-                        :, :, -seq.pre_encode_cache_size :
-                    ].detach()
-                else:
-                    seq.pre_encode_cache = feats_in.detach()
-            if pre_encoded is not None and pre_encoded.numel() > 0:
-                seq.enc_buffer = torch.cat([seq.enc_buffer, pre_encoded], dim=1)
+            if has_cache and drop_extra_pre_encoded > 0:
+                pre_encoded = pre_encoded[:, drop_extra_pre_encoded:, :]
+
+            with seq.lock:
+                if seq.feature_extractor is None:
+                    return
+                if pre_encode_cache_size > 0:
+                    if feats_in.size(-1) >= pre_encode_cache_size:
+                        seq.pre_encode_cache = feats_in[
+                            :, :, -pre_encode_cache_size:
+                        ].detach()
+                    else:
+                        seq.pre_encode_cache = feats_in.detach()
+                if pre_encoded is not None and pre_encoded.numel() > 0:
+                    seq.enc_buffer = torch.cat([seq.enc_buffer, pre_encoded], dim=1)
 
     def _encode_step(self) -> None:
         chunks = []
@@ -316,8 +318,6 @@ class ModelRunner:
             chunks.append(chunk)
             lengths.append(int(length.item()))
             active_seqs.append(seq)
-        if active_seqs:
-            print(f"active seqs: {len(active_seqs)}")
 
         if self.config.num_concurrent_requests > 0:
             chunks = chunks[: self.config.num_concurrent_requests]
@@ -383,7 +383,12 @@ class ModelRunner:
 
         for seq in list(self.scheduler.active_sequences()):
             with seq.lock:
-                if seq.final and not seq.has_chunk_ready() and not seq.has_encoded():
+                if (
+                    seq.final
+                    and not seq.has_pending_audio()
+                    and not seq.has_chunk_ready()
+                    and not seq.has_encoded()
+                ):
                     seq.status = SequenceStatus.FINISHED
                 if (
                     seq.is_finished
@@ -494,6 +499,7 @@ class ModelRunner:
         if seq.encoder_state is not None:
             self._release_state(seq.encoder_state)
             seq.encoder_state = None
+        seq.cleanup()
 
     def _pack_states(self, seqs: Iterable[Sequence]):
         seqs = list(seqs)

@@ -45,10 +45,8 @@ class Sequence:
         self.device = device
         self.config = config or SequenceConfig()
         self.lock = threading.Lock()
-        self.lock = threading.Lock()
 
         self.feature_extractor = feature_extractor
-        self.emitted_frames = 0
         self.encoder_state = encoder_state
         self.pred_state = pred_state
         self.pred_out = pred_out

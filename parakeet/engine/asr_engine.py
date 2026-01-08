@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections import deque
+import threading
 from typing import Dict, Iterable
 
 import numpy as np
@@ -20,6 +22,8 @@ class ASREngine:
         self.runner = ModelRunner(config, self.device, self.scheduler)
         self.tokenizer = self.runner.model.get_tokenizer()
         self.streams: Dict[int, Sequence] = {}
+        self._result_lock = threading.Lock()
+        self._stream_results: Dict[int, deque[StreamResult]] = {}
 
         self.runner.start_workers()
 
@@ -32,6 +36,8 @@ class ASREngine:
             raise RuntimeError("No free streaming state available.")
         self.runner.add_sequence(seq)
         self.streams[seq.request_id] = seq
+        with self._result_lock:
+            self._stream_results[seq.request_id] = deque()
         return seq.request_id
 
     def push_pcm(self, stream_id: int, pcm_bytes: bytes, final: bool = False) -> None:
@@ -49,31 +55,48 @@ class ASREngine:
     def drain(self) -> list[DecodeResult]:
         return self.runner.drain_results()
 
+    def _drain_to_stream_results_locked(self) -> None:
+        items = self.runner.drain_results()
+        for item in items:
+            seq = self.streams.get(item.seq_id)
+            if seq is None:
+                continue
+            with seq.lock:
+                text = self.decode(seq.token_ids)
+                is_final = seq.is_finished
+            stream_result = StreamResult(
+                stream_id=item.seq_id,
+                text=text,
+                token_ids=item.token_ids,
+                is_final=is_final,
+            )
+            self._stream_results.setdefault(item.seq_id, deque()).append(stream_result)
+            if is_final:
+                self.cleanup_stream(item.seq_id)
+
     def decode(self, token_ids: Iterable[int]) -> str:
         return self.tokenizer.decode(list(token_ids))
 
     def collect_results(self) -> list[StreamResult]:
-        results = []
-        for item in self.drain():
-            seq = self.streams.get(item.seq_id)
-            if seq is None:
-                continue
-            text = self.decode(seq.token_ids)
-            results.append(
-                StreamResult(
-                    stream_id=item.seq_id,
-                    text=text,
-                    token_ids=item.token_ids,
-                    is_final=seq.is_finished,
-                )
-            )
-            if seq.is_finished:
-                self.cleanup_stream(item.seq_id)
-        return results
+        with self._result_lock:
+            self._drain_to_stream_results_locked()
+            results: list[StreamResult] = []
+            for queue in self._stream_results.values():
+                while queue:
+                    results.append(queue.popleft())
+            return results
+
+    def collect_stream_results(self, stream_id: int) -> list[StreamResult]:
+        with self._result_lock:
+            self._drain_to_stream_results_locked()
+            queue = self._stream_results.get(stream_id)
+            if not queue:
+                return []
+            results = list(queue)
+            queue.clear()
+            return results
 
     def cleanup_stream(self, stream_id: int) -> None:
         seq = self.streams.pop(stream_id, None)
         if seq is None:
             return
-        with seq.lock:
-            seq.cleanup()

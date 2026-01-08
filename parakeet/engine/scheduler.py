@@ -17,11 +17,6 @@ class StreamResult:
 
 
 class Scheduler:
-    """Admission-only scheduler.
-
-    This scheduler only decides when to admit sequences. It does not run the model.
-    """
-
     def __init__(self, max_active: int = 64):
         self.max_active = max_active
         self.waiting: Deque[Sequence] = deque()

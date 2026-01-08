@@ -1,88 +1,103 @@
+import argparse
 import time
 
 import librosa
 import numpy as np
 import torch
-from tqdm.auto import tqdm
 import threading
-
 
 from parakeet.config import Config
 from parakeet.engine.asr_engine import ASREngine
 
 
-def to_pcm_bytes(samples: np.ndarray) -> bytes:
-    scaled = np.clip(samples, -1.0, 1.0)
-    pcm = (scaled * 32767.0).astype(np.int16)
-    return pcm.tobytes()
-
-
-def feed_engine(stream_id, audio, chunk_samples, engine):
+def feed_engine(stream_id, audio, chunk_samples, engine, sleep_seconds: float):
     for start in range(0, len(audio), chunk_samples):
         chunk = audio[start : start + chunk_samples]
         engine.push_samples(stream_id, chunk, final=False)
-        time.sleep(0.01)
+        if sleep_seconds > 0:
+            time.sleep(sleep_seconds)
     engine.push_samples(stream_id, np.empty((0,), dtype=np.float32), final=True)
 
 
-def pull_from_engine(stream_id, engine, pbar):
+def pull_from_engine(stream_id, engine, show_text: bool = True):
     while True:
-        results = engine.collect_results()
+        results = engine.collect_stream_results(stream_id)
         if results:
-            result = [i for i in results if i.stream_id == stream_id][0]
-            text = result.text
-            print(text)
-            print("")
-            pbar.update(1)
+            for result in results:
+                if show_text:
+                    text = result.text
+                    print(f"[stream {result.stream_id}] {text}", flush=True)
+                if result.is_final:
+                    return
         else:
-            time.sleep(0.1)
-        if engine.streams[stream_id].is_finished:
-            pbar.close()
-            break
+            time.sleep(0.01)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--num-streams", type=int, default=2)
+    parser.add_argument(
+        "--audio",
+        nargs="*",
+        default=[
+            "/Users/odunolajenrola/Documents/GitHub/parakeet-streaming/test_2.mp3",
+            "/Users/odunolajenrola/Documents/GitHub/parakeet-streaming/test.mp3",
+        ],
+    )
+    parser.add_argument("--duration", type=float, default=10)
+    parser.add_argument("--sample-rate", type=int, default=16000)
+    parser.add_argument("--chunk-seconds", type=float, default=0.25)
+    parser.add_argument("--model-size", choices=("small", "large"), default="small")
+    parser.add_argument(
+        "--stream-speed",
+        type=float,
+        default=2.0,
+        help="1.0 = real-time, >1.0 = faster than real-time, <=0 = no sleep",
+    )
+    parser.add_argument("--quiet", action="store_true")
+    return parser.parse_args()
 
 
 def main():
-    first_path = "/Users/odunolajenrola/Documents/GitHub/parakeet-streaming/test.mp3"
-    second_path = "/Users/odunolajenrola/Documents/GitHub/parakeet-streaming/test_2.mp3"
+    args = parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    config = Config(size="small")
+    config = Config(size=args.model_size)
     print("Loading model...")
     engine = ASREngine(config, device=device)
-    first_stream_id = engine.create_stream()
-    second_stream_id = engine.create_stream()
 
-    first_audio, _ = librosa.load(first_path, sr=16000)
-    second_audio, _ = librosa.load(second_path, sr=16000)
+    stream_ids = [engine.create_stream() for _ in range(args.num_streams)]
+    audio_paths = args.audio
+    audios = []
+    for idx in range(args.num_streams):
+        path = audio_paths[idx % len(audio_paths)]
+        audio, _ = librosa.load(path, sr=args.sample_rate, duration=args.duration)
+        audios.append(audio)
 
-    chunk_samples = int(0.25 * 16000)
-    first_pbar = tqdm(desc=f"Running stream{first_stream_id}...")
-    second_pbar = tqdm(desc=f"Running stream{second_stream_id}...")
+    chunk_samples = int(args.chunk_seconds * args.sample_rate)
+    if args.stream_speed > 0:
+        sleep_seconds = args.chunk_seconds / args.stream_speed
+    else:
+        sleep_seconds = 0.0
+    producers = [
+        threading.Thread(
+            target=feed_engine,
+            args=(stream_id, audio, chunk_samples, engine, sleep_seconds),
+        )
+        for stream_id, audio in zip(stream_ids, audios)
+    ]
+    consumers = [
+        threading.Thread(
+            target=pull_from_engine, args=(stream_id, engine, not args.quiet)
+        )
+        for stream_id in stream_ids
+    ]
 
-    producer_one = threading.Thread(
-        target=feed_engine,
-        args=(first_stream_id, first_audio, chunk_samples, engine),
-    )
-    producer_two = threading.Thread(
-        target=feed_engine,
-        args=(second_stream_id, second_audio, chunk_samples, engine),
-    )
-    consumer_one = threading.Thread(
-        target=pull_from_engine, args=(first_stream_id, engine, first_pbar)
-    )
-    consumer_two = threading.Thread(
-        target=pull_from_engine, args=(second_stream_id, engine, second_pbar)
-    )
+    for thread in producers + consumers:
+        thread.start()
 
-    producer_one.start()
-    consumer_one.start()
-    producer_two.start()
-    consumer_two.start()
-
-    producer_two.join()
-    consumer_two.join()
-    consumer_one.join()
-    producer_one.join()
+    for thread in producers + consumers:
+        thread.join()
 
     engine.close()
 
