@@ -257,15 +257,13 @@ class ConformerEncoder(nn.Module):
 
         return pad_mask, att_mask
 
-    def forward_streaming(
+    def forward(
         self,
         x: Tensor,
         state: StreamingState,
         length: Tensor | None = None,
         bypass_pre_encode: bool = False,
     ):
-        if not self.stream:
-            raise ValueError("forward_streaming requires encoder.stream=True.")
         if not bypass_pre_encode:
             if length is None:
                 length = x.new_full(
@@ -313,28 +311,3 @@ class ConformerEncoder(nn.Module):
             )
         x = x.transpose(1, 2)
         return x, state
-
-    def forward(self, x: Tensor, length: Tensor = None, cache: ModelCache = None):
-        raise RuntimeError(
-            "Offline encoder forward is removed. Use forward_streaming instead."
-        )
-
-
-if __name__ == "__main__":
-    encoder = ConformerEncoder(
-        feat_in=128,
-        hidden_size=512,
-        ff_expansion_factor=4,
-        num_layers=17,
-        num_heads=8,
-        subsampling_factor=8,
-        pos_emb_max_len=5000,
-        conv_kernel_size=9,
-        att_context_size=[70, 1],
-        subsampling_conv_channels=256,
-        use_bias=False,
-    ).eval()
-    x = torch.randn(1, 128, 201)
-    lengths = torch.LongTensor([201])
-    output = encoder(x, lengths)
-    print(output)

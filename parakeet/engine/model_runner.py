@@ -316,6 +316,8 @@ class ModelRunner:
             chunks.append(chunk)
             lengths.append(int(length.item()))
             active_seqs.append(seq)
+        if active_seqs:
+            print(f"active seqs: {len(active_seqs)}")
 
         if self.config.num_concurrent_requests > 0:
             chunks = chunks[: self.config.num_concurrent_requests]
@@ -338,7 +340,7 @@ class ModelRunner:
         batch_state = self._pack_states(active_seqs)
 
         with torch.inference_mode():
-            chunk_out, batch_state = self.encoder.forward_streaming(
+            chunk_out, batch_state = self.encoder(
                 batch,
                 batch_state,
                 length=length_tensor,

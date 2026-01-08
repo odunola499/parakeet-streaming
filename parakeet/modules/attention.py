@@ -95,7 +95,6 @@ class ConformerAttention(nn.Module):
         query, key, value = qkv.chunk(3, dim=-1)
         if cache:
             key, value = cache.update_attn_cache(self.layer_idx, (key, value))
-
         query = query.view(B, -1, self.num_heads, self.d_k)
         key = key.view(B, -1, self.num_heads, self.d_k).transpose(1, 2)
         value = value.view(B, -1, self.num_heads, self.d_k).transpose(1, 2)
@@ -113,7 +112,6 @@ class ConformerAttention(nn.Module):
         matrix_bd = matrix_bd[:, :, :, : key.size(-2)] * (1 / self.s_d_k)
 
         matrix_bd = matrix_bd.masked_fill(attn_mask, -1e5)
-
         output = sdpa_attention_forward(
             query=q_with_bias_u, key=key, value=value, attention_mask=matrix_bd
         )
@@ -121,10 +119,11 @@ class ConformerAttention(nn.Module):
         all_masked_rows = torch.all(attn_mask, dim=-1).unsqueeze(-1).unsqueeze(-1)
         if all_masked_rows.ndim == 3:
             all_masked_rows = all_masked_rows.squeeze(1)
-        output = output.masked_fill(all_masked_rows, 0.0)
+        # output = output.masked_fill(all_masked_rows, 0.0)
 
         output = output.reshape(B, -1, self.num_heads * self.d_k)
         output = self.linear_out(output)
+
         return output
 
 

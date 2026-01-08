@@ -197,10 +197,3 @@ class ConformerConvolution(nn.Module):
         if cache is None:
             return x
         return x, cache
-
-
-__all__ = [
-    "CausalConv1d",
-    "CausalConv2D",
-    "ConformerConvolution",
-]
