@@ -1,14 +1,19 @@
 from typing import Literal
+
 import torch
-from torch import nn, Tensor
 from huggingface_hub import hf_hub_download
 from safetensors.torch import safe_open
-from parakeet.model.config import ModelConfig, LargeModelConfig
-from parakeet.model.encoder import ConformerEncoder
-from parakeet.model.decoder import Predictor, Joiner
-from parakeet.model.tokenizer import ParakeetTokenizer
-from parakeet.model.feature_extractor import ParakeetFeatureExtractor
-from parakeet.model.generation import GenerationMixin
+from torch import Tensor, nn
+
+from parakeet.config import LargeModelConfig, ModelConfig
+from parakeet.modules import (
+    ConformerEncoder,
+    FeatureExtractor,
+    GenerationMixin,
+    Joiner,
+    Predictor,
+    Tokenizer,
+)
 
 WEIGHTS_MAP = {
     "large": "odunola/Nemo-Speech-Large",
@@ -142,7 +147,7 @@ class Parakeet(nn.Module, GenerationMixin):
         state_dict = remap_weights(state_dict)
         model.load_state_dict(state_dict)
         print("loaded model")
-        model._feature_extractor = ParakeetFeatureExtractor()
-        model._tokenizer = ParakeetTokenizer(tokenizer_path)
+        model._feature_extractor = FeatureExtractor()
+        model._tokenizer = Tokenizer(tokenizer_path)
 
         return model

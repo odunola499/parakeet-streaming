@@ -3,7 +3,7 @@ import math
 import torch
 from torch import Tensor, nn
 
-from parakeet.model.convolution import CausalConv2D
+from parakeet.modules.convolution import CausalConv2D
 
 
 def calc_length(lengths, all_paddings, kernel_size, stride, repeat_num=1):
@@ -33,7 +33,7 @@ class MaskedConvSequential(nn.Sequential):
         current_lengths = lengths.clone().float()
         mask = self._create_mask(x, current_lengths.long())
 
-        for i, layer in enumerate(self):
+        for layer in self:
             x = apply_channel_mask(x, mask)
 
             x = layer(x)
@@ -179,3 +179,11 @@ class ConvSubsampling(nn.Module):
     def conv_forward(self, x: Tensor, lengths: Tensor):
         x, lengths = self.conv(x, lengths)
         return x, lengths
+
+
+__all__ = [
+    "ConvSubsampling",
+    "calc_length",
+    "apply_channel_mask",
+    "calculate_conv_output_size",
+]

@@ -24,3 +24,6 @@ class ConformerFeedForward(nn.Module):
         x = self.dropout(x)
         x = self.linear2(x)
         return x
+
+
+__all__ = ["ConformerFeedForward"]

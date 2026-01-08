@@ -1,7 +1,9 @@
 import math
+
 import torch
-from torch import nn, Tensor
-from parakeet.model.naive_cache import ModelCache
+from torch import Tensor, nn
+
+from parakeet.modules.cache import ModelCache
 
 
 def sdpa_attention_forward(
@@ -124,3 +126,10 @@ class ConformerAttention(nn.Module):
         output = output.reshape(B, -1, self.num_heads * self.d_k)
         output = self.linear_out(output)
         return output
+
+
+__all__ = [
+    "ConformerAttention",
+    "PositionalEncoding",
+    "sdpa_attention_forward",
+]

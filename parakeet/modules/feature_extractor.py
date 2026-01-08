@@ -1,12 +1,11 @@
 import math
 
 import librosa
-import torch
-from typing import List
 import numpy as np
+import torch
 
 
-class ParakeetFeatureExtractor:
+class FeatureExtractor:
     model_input_names = ["input_features"]
 
     def __init__(
@@ -19,14 +18,12 @@ class ParakeetFeatureExtractor:
         normalize="NA",
         preemph=0.97,
         dither=1e-5,
-        log=True,
         log_zero_guard_value=2**-24,
         lowfreq=0,
         highfreq=None,
         mag_power=2.0,
         pad_value=0.0,
         mel_norm="slaney",
-        **kwargs,
     ):
         super().__init__()
 
@@ -42,7 +39,6 @@ class ParakeetFeatureExtractor:
         self.hop_length = int(window_stride * sampling_rate)
         self.preemph = preemph
         self.dither = dither
-        self.log = log
         self.log_zero_guard_value = float(log_zero_guard_value)
         self.mag_power = mag_power
         self.pad_value = pad_value
@@ -60,13 +56,15 @@ class ParakeetFeatureExtractor:
         ).astype(np.float32)
         self.fb = torch.from_numpy(fb)
 
+        self.samples = np.empty((0,), dtype=np.float32)
+        self.emitted_frames = 0
+
     def _get_seq_len(self, seq_len: int) -> int:
         pad_amount = self.n_fft
         return (seq_len + pad_amount - self.n_fft) // self.hop_length
 
-    def _compute_features(self, waveform: List[np.ndarray], seq_len_time: int):
-        waveform = np.stack(waveform, axis=0)
-        x = torch.from_numpy(waveform).to(dtype=torch.float32)
+    def _compute_features(self, waveform: np.ndarray):
+        x = torch.from_numpy(waveform).unsqueeze(0)
 
         x = x + torch.randn_like(x) * self.dither
         right = x[:, 1:] - self.preemph * x[:, :-1]
@@ -85,48 +83,32 @@ class ParakeetFeatureExtractor:
 
         spec = torch.view_as_real(stft)
         spec = torch.sqrt(spec.pow(2).sum(-1))
-        if self.mag_power != 1.0:
-            spec = spec.pow(self.mag_power)
+        spec = spec.pow(self.mag_power)
 
         mel = torch.matmul(self.fb.to(dtype=spec.dtype), spec)
-        if self.log:
-            mel = torch.log(mel + self.log_zero_guard_value)
+        mel = torch.log(mel + self.log_zero_guard_value)
 
         return mel
 
-    def __call__(
-        self,
-        audio,
-        return_tensors: str | None = None,
-        padding: bool = True,
-        pad_to: int = None,
-    ):
-        if isinstance(audio, np.ndarray):
-            if audio.ndim == 1:
-                audio_list = [audio]
-            elif audio.ndim == 2:
-                audio_list = [audio[i] for i in range(audio.shape[0])]
-            else:
-                raise ValueError("audio must be 1D or 2D numpy array")
-        elif isinstance(audio, (list, tuple)):
-            audio_list = list(audio)
+    def __call__(self, audio, return_tensors: str | None = None, padding: bool = True):
+        assert isinstance(audio, np.ndarray)
+        assert audio.ndim == 1
+
+        features = self._compute_features(audio)
+        return features
+
+    def push(self, samples: np.ndarray, final: bool = False):
+        if samples.size:
+            self.samples = np.concatenate([self.samples, samples])
+        features = self._compute_features(self.samples)
+        total_frames = features.shape[-1]
+        if final:
+            stable_frames = total_frames
         else:
-            raise ValueError("audio must be a numpy array or a list of numpy arrays")
-
-        features = self._compute_features(audio_list, audio_list[0].shape[-1])
-        if pad_to:
-            time_length = features.shape[-1]
-            assert time_length <= pad_to, "time_length must be less than pad_to"
-            remains = pad_to - time_length
-            features = torch.nn.functional.pad(features, (0, remains))
-
-        return {"input_features": features}
-
-
-if __name__ == "__main__":
-    import numpy as np
-
-    feature_extractor = ParakeetFeatureExtractor()
-    array = np.random.randn(2000)
-    print(array.shape)
-    print(feature_extractor([array] * 2)["input_features"].shape)
+            stable_frames = (len(self.samples) - self.n_fft // 2) // self.hop_length + 1
+            stable_frames = max(0, min(stable_frames, total_frames))
+        if stable_frames <= self.emitted_frames:
+            return None
+        new_feats = features[:, :, self.emitted_frames : stable_frames]
+        self.emitted_frames = stable_frames
+        return new_feats

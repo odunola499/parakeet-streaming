@@ -1,10 +1,11 @@
 import torch
-from torch import nn, Tensor
-from parakeet.model.attention import ConformerAttention, PositionalEncoding
-from parakeet.model.convolution import ConformerConvolution
-from parakeet.model.subsample import ConvSubsampling
-from parakeet.model.feedforward import ConformerFeedForward
-from parakeet.model.naive_cache import ModelCache, StreamingState
+from torch import Tensor, nn
+
+from parakeet.modules.attention import ConformerAttention, PositionalEncoding
+from parakeet.modules.convolution import ConformerConvolution
+from parakeet.modules.feedforward import ConformerFeedForward
+from parakeet.modules.subsample import ConvSubsampling
+from parakeet.modules.cache import ModelCache, StreamingState
 
 
 class ConformerLayer(nn.Module):
@@ -170,13 +171,19 @@ class ConformerEncoder(nn.Module):
                 "Unlimited left context is not supported for streaming caches."
             )
         cache = ModelCache(num_layers=len(self.layers), L_attn=cache_len)
-        return StreamingState(cache=cache, processed_frames=0)
+        processed_frames = torch.zeros(batch_size, dtype=torch.int64, device=device)
+        cache_lengths = torch.zeros(batch_size, dtype=torch.int64, device=device)
+        return StreamingState(
+            cache=cache,
+            processed_frames=processed_frames,
+            cache_lengths=cache_lengths,
+        )
 
     def _create_streaming_masks(
         self,
         current_len: int,
-        cache_len: int,
-        processed_frames: int,
+        cache_lengths: Tensor,
+        processed_frames: Tensor,
         device: torch.device,
         lengths: Tensor | None = None,
     ):
@@ -191,46 +198,63 @@ class ConformerEncoder(nn.Module):
         else:
             left_chunks_num = 10000
 
-        key_start = max(processed_frames - cache_len, 0)
-        key_len = cache_len + current_len
-        key_pos = torch.arange(
-            key_start, key_start + key_len, device=device, dtype=torch.int
-        )
-        query_pos = key_pos[-current_len:]
-
-        chunk_idx_k = torch.div(key_pos, chunk_size, rounding_mode="trunc")
-        chunk_idx_q = torch.div(query_pos, chunk_size, rounding_mode="trunc")
-        diff_chunks = chunk_idx_q.unsqueeze(1) - chunk_idx_k.unsqueeze(0)
-        allowed = torch.logical_and(
-            torch.le(diff_chunks, left_chunks_num), torch.ge(diff_chunks, 0)
-        )
-
+        batch_size = int(cache_lengths.size(0))
         if lengths is None:
-            batch_size = 1
-            pad_mask = torch.zeros(
-                batch_size, current_len, device=device, dtype=torch.bool
+            lengths = torch.full(
+                (batch_size,),
+                current_len,
+                dtype=torch.int64,
+                device=device,
             )
-            att_mask = ~allowed.unsqueeze(0)
-            return pad_mask, att_mask
 
-        batch_size = lengths.size(0)
-        valid_current = torch.arange(current_len, device=device).expand(
-            batch_size, -1
-        ) < lengths.unsqueeze(-1)
-        pad_mask = ~valid_current
-
-        valid_total = torch.cat(
-            [
-                torch.ones(batch_size, cache_len, device=device, dtype=torch.bool),
-                valid_current,
-            ],
-            dim=1,
+        max_cache_len = int(cache_lengths.max().item())
+        key_len_max = max_cache_len + current_len
+        pad_mask = torch.zeros(batch_size, current_len, device=device, dtype=torch.bool)
+        att_mask = torch.ones(
+            batch_size, current_len, key_len_max, device=device, dtype=torch.bool
         )
-        valid_for_att = valid_current.unsqueeze(2) & valid_total.unsqueeze(1)
 
-        allowed = allowed.unsqueeze(0).expand(batch_size, -1, -1)
-        allowed = torch.logical_and(valid_for_att, allowed)
-        att_mask = ~allowed
+        for idx in range(batch_size):
+            cache_len = int(cache_lengths[idx].item())
+            proc = int(processed_frames[idx].item())
+            key_start = max(proc - cache_len, 0)
+            key_len = cache_len + current_len
+            key_pos = torch.arange(
+                key_start, key_start + key_len, device=device, dtype=torch.int
+            )
+            query_pos = key_pos[-current_len:]
+
+            chunk_idx_k = torch.div(key_pos, chunk_size, rounding_mode="trunc")
+            chunk_idx_q = torch.div(query_pos, chunk_size, rounding_mode="trunc")
+            diff_chunks = chunk_idx_q.unsqueeze(1) - chunk_idx_k.unsqueeze(0)
+            allowed = torch.logical_and(
+                torch.le(diff_chunks, left_chunks_num), torch.ge(diff_chunks, 0)
+            )
+
+            valid_current = torch.arange(current_len, device=device) < lengths[idx]
+            pad_mask[idx] = ~valid_current
+
+            valid_total = torch.cat(
+                [
+                    torch.ones(cache_len, device=device, dtype=torch.bool),
+                    valid_current,
+                ],
+                dim=0,
+            )
+
+            offset = max_cache_len - cache_len
+            allowed_full = torch.zeros(
+                current_len, key_len_max, device=device, dtype=torch.bool
+            )
+            allowed_full[:, offset : offset + key_len] = allowed
+
+            valid_total_full = torch.zeros(key_len_max, device=device, dtype=torch.bool)
+            valid_total_full[offset : offset + key_len] = valid_total
+
+            valid_for_att = valid_current.unsqueeze(1) & valid_total_full.unsqueeze(0)
+            allowed_full = torch.logical_and(allowed_full, valid_for_att)
+            att_mask[idx] = ~allowed_full
+
         return pad_mask, att_mask
 
     def forward_streaming(
@@ -255,13 +279,14 @@ class ConformerEncoder(nn.Module):
                     (x.size(0),), x.size(1), dtype=torch.int64, device=x.device
                 )
 
-        cache_len = state.attn_cache_len()
-        cache_len = min(cache_len, state.processed_frames)
+        cache_lengths = state.cache_lengths
+        cache_len_max = state.attn_cache_len()
+        state.cache.current_max_len = cache_len_max
 
-        x, pos_emb = self.pos_enc(x, cache_len=cache_len)
+        x, pos_emb = self.pos_enc(x, cache_len=cache_len_max)
         pad_mask, att_mask = self._create_streaming_masks(
             current_len=x.size(1),
-            cache_len=cache_len,
+            cache_lengths=cache_lengths,
             processed_frames=state.processed_frames,
             device=x.device,
             lengths=length,
@@ -276,7 +301,16 @@ class ConformerEncoder(nn.Module):
                 cache=state.cache,
             )
 
-        state.processed_frames += x.size(1)
+        if isinstance(length, Tensor):
+            state.processed_frames = state.processed_frames + length
+            state.cache_lengths = torch.clamp(
+                state.cache_lengths + length, max=self.att_context_size[0]
+            )
+        else:
+            state.processed_frames += x.size(1)
+            state.cache_lengths = min(
+                int(state.cache_lengths) + x.size(1), self.att_context_size[0]
+            )
         x = x.transpose(1, 2)
         return x, state
 
