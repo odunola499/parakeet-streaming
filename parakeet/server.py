@@ -1,0 +1,247 @@
+from __future__ import annotations
+
+import base64
+import json
+import logging
+from dataclasses import dataclass
+from typing import Any, Iterable
+
+import numpy as np
+import trio
+
+from parakeet.config import Config
+from parakeet.engine.asr_engine import ASREngine
+from parakeet.engine.scheduler import StreamResult
+
+
+@dataclass
+class ConnectionState:
+    stream_id: int
+    final_requested: bool = False
+    disconnected: bool = False
+
+
+class ASRSocketServer:
+    def __init__(
+        self,
+        config: Config,
+        host: str = "0.0.0.0",
+        port: int = 8765,
+        device: str = "cpu",
+    ):
+        self.config = config
+        self.host = host
+        self.port = port
+        self.device = device
+        self.engine = ASREngine(config, device=device)
+
+    async def serve(self) -> None:
+        logging.info("Starting server on %s:%s", self.host, self.port)
+        await trio.serve_tcp(self._handle_client, self.port, host=self.host)
+
+    def close(self) -> None:
+        self.engine.close()
+
+    async def _handle_client(self, stream: trio.SocketStream) -> None:
+        try:
+            stream_id = self.engine.create_stream()
+        except RuntimeError as exc:
+            send_lock = trio.Lock()
+            await _send_json(
+                stream,
+                send_lock,
+                {"type": "error", "message": str(exc)},
+            )
+            await stream.aclose()
+            return
+
+        state = ConnectionState(stream_id=stream_id)
+        send_lock = trio.Lock()
+        await _send_json(
+            stream,
+            send_lock,
+            {
+                "type": "hello",
+                "stream_id": state.stream_id,
+                "sample_rate": self.config.sample_rate,
+            },
+        )
+
+        try:
+            async with trio.open_nursery() as nursery:
+                nursery.start_soon(
+                    self._reader_loop, stream, state, send_lock, nursery.cancel_scope
+                )
+                nursery.start_soon(
+                    self._writer_loop, stream, state, send_lock, nursery.cancel_scope
+                )
+        finally:
+            await self._finalize_stream(state)
+            await stream.aclose()
+
+    async def _reader_loop(
+        self,
+        stream: trio.SocketStream,
+        state: ConnectionState,
+        send_lock: trio.Lock,
+        cancel_scope: trio.CancelScope,
+    ) -> None:
+        buffer = bytearray()
+        try:
+            while True:
+                data = await stream.receive_some(4096)
+                if not data:
+                    state.disconnected = True
+                    cancel_scope.cancel()
+                    return
+                buffer.extend(data)
+                for message in _drain_messages(buffer):
+                    msg_type = message.get("type")
+                    if msg_type == "audio":
+                        samples, final = _parse_audio_message(message)
+                        if samples.size or final:
+                            self.engine.push_samples(
+                                state.stream_id, samples, final=final
+                            )
+                        if final:
+                            state.final_requested = True
+                            return
+                    elif msg_type == "close":
+                        self._request_final(state)
+                        return
+                    elif msg_type == "ping":
+                        await _send_json(stream, send_lock, {"type": "pong"})
+                    else:
+                        await _send_json(
+                            stream,
+                            send_lock,
+                            {"type": "error", "message": "unknown message type"},
+                        )
+        except trio.BrokenResourceError:
+            state.disconnected = True
+            cancel_scope.cancel()
+        except Exception:
+            logging.exception("Reader loop failed for stream %s", state.stream_id)
+            state.disconnected = True
+            cancel_scope.cancel()
+
+    async def _writer_loop(
+        self,
+        stream: trio.SocketStream,
+        state: ConnectionState,
+        send_lock: trio.Lock,
+        cancel_scope: trio.CancelScope,
+    ) -> None:
+        try:
+            last_seq = self.engine.get_update_seq()
+            while True:
+                results = self.engine.collect_stream_results(state.stream_id)
+                for result in results:
+                    payload = _result_payload(result)
+                    await _send_json(stream, send_lock, payload)
+                    if result.is_final:
+                        state.final_requested = True
+                        cancel_scope.cancel()
+                        return
+                if results:
+                    continue
+                last_seq = await trio.to_thread.run_sync(
+                    self.engine.wait_for_update,
+                    last_seq,
+                    abandon_on_cancel=True,
+                )
+        except trio.BrokenResourceError:
+            state.disconnected = True
+            cancel_scope.cancel()
+        except Exception:
+            logging.exception("Writer loop failed for stream %s", state.stream_id)
+            state.disconnected = True
+            cancel_scope.cancel()
+
+    def _request_final(self, state: ConnectionState) -> None:
+        if state.final_requested:
+            return
+        state.final_requested = True
+        try:
+            self.engine.push_samples(
+                state.stream_id, np.empty((0,), dtype=np.float32), final=True
+            )
+        except KeyError:
+            return
+
+    async def _finalize_stream(self, state: ConnectionState) -> None:
+        if state.stream_id not in self.engine.streams:
+            return
+        if not state.final_requested:
+            self._request_final(state)
+        last_seq = self.engine.get_update_seq()
+        while True:
+            seq = self.engine.streams.get(state.stream_id)
+            if seq is None:
+                return
+            with seq.lock:
+                finished = seq.is_finished
+            if finished:
+                self.engine.cleanup_stream(state.stream_id)
+                with self.engine._result_lock:
+                    self.engine._stream_results.pop(state.stream_id, None)
+                return
+            self.engine.collect_stream_results(state.stream_id)
+            last_seq = await trio.to_thread.run_sync(
+                self.engine.wait_for_update,
+                last_seq,
+                abandon_on_cancel=True,
+            )
+
+
+def _drain_messages(buffer: bytearray) -> Iterable[dict[str, Any]]:
+    while True:
+        newline = buffer.find(b"\n")
+        if newline == -1:
+            break
+        raw_line = buffer[:newline]
+        del buffer[: newline + 1]
+        if not raw_line.strip():
+            continue
+        try:
+            yield json.loads(raw_line.decode("utf-8"))
+        except json.JSONDecodeError:
+            continue
+
+
+def _parse_audio_message(message: dict[str, Any]) -> tuple[np.ndarray, bool]:
+    final = bool(message.get("final", False))
+    if "samples" in message:
+        samples = np.asarray(message["samples"], dtype=np.float32)
+        return samples, final
+    data = message.get("data")
+    if not data:
+        return np.empty((0,), dtype=np.float32), final
+    raw = base64.b64decode(data)
+    encoding = message.get("encoding", "pcm16")
+    if encoding == "pcm16":
+        samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+        return samples, final
+    if encoding == "f32":
+        samples = np.frombuffer(raw, dtype=np.float32)
+        return samples, final
+    raise ValueError(f"Unsupported encoding: {encoding}")
+
+
+def _result_payload(result: StreamResult) -> dict[str, Any]:
+    return {
+        "type": "result",
+        "stream_id": result.stream_id,
+        "text": result.text,
+        "token_ids": result.token_ids,
+        "is_final": result.is_final,
+    }
+
+
+async def _send_json(
+    stream: trio.SocketStream, lock: trio.Lock, payload: dict[str, Any]
+) -> None:
+    message = json.dumps(payload, separators=(",", ":")) + "\n"
+    data = message.encode("utf-8")
+    async with lock:
+        await stream.send_all(data)

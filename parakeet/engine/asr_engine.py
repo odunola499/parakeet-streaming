@@ -55,6 +55,12 @@ class ASREngine:
     def drain(self) -> list[DecodeResult]:
         return self.runner.drain_results()
 
+    def get_update_seq(self) -> int:
+        return self.runner.get_update_seq()
+
+    def wait_for_update(self, last_seq: int, timeout: float | None = None) -> int:
+        return self.runner.wait_for_update(last_seq, timeout=timeout)
+
     def _drain_to_stream_results_locked(self) -> None:
         items = self.runner.drain_results()
         for item in items:

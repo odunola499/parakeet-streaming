@@ -33,6 +33,8 @@ class ModelRunner:
         self._stop_event = threading.Event()
         self._threads: list[threading.Thread] = []
         self._results_queue: queue.Queue[DecodeResult] = queue.Queue()
+        self._update_cond = threading.Condition()
+        self._update_seq = 0
 
     def _init_model(self) -> None:
         self.model = Parakeet.from_pretrained(self.config.size).to(self.device)
@@ -199,7 +201,8 @@ class ModelRunner:
         self.scheduler.admit_ready()
         self._pre_encode_step()
         self._encode_step()
-        return self._decode_step()
+        results, _ = self._decode_step()
+        return results
 
     def start_workers(self, interval: float = 0.001) -> None:
         if self._threads:
@@ -232,6 +235,17 @@ class ModelRunner:
                 break
         return results
 
+    def get_update_seq(self) -> int:
+        with self._update_cond:
+            return self._update_seq
+
+    def wait_for_update(self, last_seq: int, timeout: float | None = None) -> int:
+        with self._update_cond:
+            if self._update_seq != last_seq:
+                return self._update_seq
+            self._update_cond.wait(timeout=timeout)
+            return self._update_seq
+
     def _pre_encode_loop(self, interval: float) -> None:
         while not self._stop_event.is_set():
             self.scheduler.admit_ready()
@@ -245,9 +259,11 @@ class ModelRunner:
 
     def _decode_loop(self, interval: float) -> None:
         while not self._stop_event.is_set():
-            results = self._decode_step()
+            results, state_changed = self._decode_step()
             for result in results:
                 self._results_queue.put(result)
+            if results or state_changed:
+                self._notify_update()
             self._stop_event.wait(interval)
 
     def _pre_encode_step(self) -> None:
@@ -357,8 +373,9 @@ class ModelRunner:
             with seq.lock:
                 seq.in_flight = max(0, seq.in_flight - 1)
 
-    def _decode_step(self) -> list[DecodeResult]:
+    def _decode_step(self) -> tuple[list[DecodeResult], bool]:
         results: list[DecodeResult] = []
+        state_changed = False
         batch_seqs: list[Sequence] = []
         batch_chunks: list[torch.Tensor] = []
         for seq in list(self.scheduler.active_sequences()):
@@ -366,6 +383,7 @@ class ModelRunner:
                 if seq.status == SequenceStatus.FINISHED:
                     if seq.in_flight == 0:
                         self._release_sequence(seq)
+                        state_changed = True
                     continue
                 if seq.has_encoded():
                     chunk = seq.pop_encoded()
@@ -390,13 +408,15 @@ class ModelRunner:
                     and not seq.has_encoded()
                 ):
                     seq.status = SequenceStatus.FINISHED
+                    state_changed = True
                 if (
                     seq.is_finished
                     and not seq.has_pending_audio()
                     and seq.in_flight == 0
                 ):
                     self._release_sequence(seq)
-        return results
+                    state_changed = True
+        return results, state_changed
 
     def _decode_batch(
         self, seqs: list[Sequence], chunks: list[torch.Tensor]
@@ -591,3 +611,8 @@ class ModelRunner:
         return torch.tensor(
             [value], device=self.device, dtype=torch.int64, pin_memory=True
         )
+
+    def _notify_update(self) -> None:
+        with self._update_cond:
+            self._update_seq += 1
+            self._update_cond.notify_all()
