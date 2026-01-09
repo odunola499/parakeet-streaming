@@ -35,16 +35,16 @@ def pull_from_engine(stream_id, engine, show_text: bool = True):
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--num-streams", type=int, default=2)
+    parser.add_argument("--num-streams", type=int, default=1)
     parser.add_argument(
         "--audio",
         nargs="*",
         default=[
-            "/Users/odunolajenrola/Documents/GitHub/parakeet-streaming/test_2.mp3",
+            "/Users/odunolajenrola/Documents/GitHub/parakeet-streaming/test.mp3",
             "/Users/odunolajenrola/Documents/GitHub/parakeet-streaming/test.mp3",
         ],
     )
-    parser.add_argument("--duration", type=float, default=10)
+    parser.add_argument("--duration", type=float, default=2)
     parser.add_argument("--sample-rate", type=int, default=16000)
     parser.add_argument("--chunk-seconds", type=float, default=0.25)
     parser.add_argument("--model-size", choices=("small", "large"), default="small")
@@ -93,11 +93,14 @@ def main():
         for stream_id in stream_ids
     ]
 
-    for thread in producers + consumers:
-        thread.start()
+    for prod, cons in zip(producers, consumers):
+        prod.start()
+        time.sleep(0.5)
+        cons.start()
 
-    for thread in producers + consumers:
-        thread.join()
+    for prod, cons in zip(producers, consumers):
+        prod.join()
+        cons.join()
 
     engine.close()
 

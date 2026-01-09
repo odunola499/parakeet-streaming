@@ -20,6 +20,7 @@ dependencies = [
   "safetensors>=0.7.0",
   "soundfile>=0.13.1",
   "trio>=0.32.0",
+  "fastapi>=0.128.0",
 ]
 
 [project.optional-dependencies]

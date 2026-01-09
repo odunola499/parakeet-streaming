@@ -96,39 +96,7 @@ class Joiner(nn.Module):
         )
         self.joint_net = nn.Sequential(*layers)
 
-    def forward(
-        self,
-        encoder_output: Tensor,  # B, d1, T
-        predictor_output: Tensor,  # B, d2, U
-    ):
-
-        if encoder_output.shape[-1] == self.encoder_dim:
-            pass
-        elif encoder_output.shape[1] == self.encoder_dim:
-            encoder_output = encoder_output.transpose(1, 2)
-        else:
-            raise ValueError("encoder_output last dim must match encoder_dim")
-
-        if predictor_output.dim() == 2:
-            predictor_output = predictor_output.unsqueeze(1)
-        elif predictor_output.dim() != 3:
-            raise ValueError(
-                "predictor_output must have shape (B, D), (B, U, D), or (B, D, U)"
-            )
-
-        if predictor_output.shape[-1] == self.pred_dim:
-            pass
-        elif predictor_output.shape[1] == self.pred_dim:
-            predictor_output = predictor_output.transpose(1, 2)
-        else:
-            raise ValueError("predictor_output last dim must match pred_dim")
-
-        encoder_output = self.enc(encoder_output).unsqueeze(2)
-        decoder_output = self.pred(predictor_output).unsqueeze(1)
-        joined = encoder_output + decoder_output
-        return self.joint_net(joined)
-
-    def forward_frame(self, encoder_frame: Tensor, predictor_out: Tensor) -> Tensor:
+    def forward(self, encoder_frame: Tensor, predictor_out: Tensor) -> Tensor:
         encoder_proj = self.enc(encoder_frame)
         predictor_proj = self.pred(predictor_out).unsqueeze(1)
         joined = encoder_proj + predictor_proj

@@ -7,9 +7,6 @@ from torch import Tensor
 class GenerationMixin(ABC):
     max_symbols_per_timestep: int = 10
 
-    def get_blank_id(self) -> int:
-        return self.blank_id
-
     def _greedy_decode_frame(
         self,
         frame: Tensor,

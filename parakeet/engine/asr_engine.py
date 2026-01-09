@@ -20,7 +20,7 @@ class ASREngine:
         self.device = torch.device(device)
         self.scheduler = Scheduler(max_active=config.max_num_streams)
         self.runner = ModelRunner(config, self.device, self.scheduler)
-        self.tokenizer = self.runner.model.get_tokenizer()
+        self.tokenizer = self.runner.model._tokenizer
         self.streams: Dict[int, Sequence] = {}
         self._result_lock = threading.Lock()
         self._stream_results: Dict[int, deque[StreamResult]] = {}

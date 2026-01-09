@@ -3,7 +3,7 @@ from typing import Literal
 import torch
 from huggingface_hub import hf_hub_download
 from safetensors.torch import safe_open
-from torch import Tensor, nn
+from torch import nn
 
 from parakeet.config import LargeModelConfig, ModelConfig
 from parakeet.modules import (
@@ -102,29 +102,8 @@ class Parakeet(nn.Module, GenerationMixin):
 
         self.blank_id = config.vocab_size
 
-    def forward(
-        self,
-        audio_features: Tensor,
-        labels: Tensor,
-        audio_lens: Tensor,
-        label_lens: Tensor | None = None,
-    ):
-        raise RuntimeError(
-            "Offline forward is removed. Use encoder.forward_streaming with "
-            "predictor.step and joiner.forward_frame."
-        )
-
-    def get_feature_extractor(self):
-        return self._feature_extractor
-
-    def get_tokenizer(self):
-        return self._tokenizer
-
-    def get_joiner(self):
-        return self.joiner
-
-    def get_predictor(self):
-        return self.predictor
+    def forward(self):
+        raise NotImplementedError
 
     @classmethod
     def from_pretrained(cls, size: Literal["small", "large"] | ModelConfig = "small"):

@@ -40,8 +40,8 @@ class ModelRunner:
 
         self.encoder = self.model.encoder
         self.pre_encoder = self.encoder.pre_encode
-        self.decoder = self.model.get_predictor()
-        self.joiner = self.model.get_joiner()
+        self.decoder = self.model.predictor
+        self.joiner = self.model.joiner
         self.sampler = self.model
 
         param = next(self.model.parameters())
@@ -58,7 +58,7 @@ class ModelRunner:
         self._chunk_frames_next = (
             self._subsampling_factor + self._subsampling_factor * self._lookahead
         )
-        self._feature_extractor_cls = type(self.model.get_feature_extractor())
+        self._feature_extractor_cls = type(self.model._feature_extractor)
         self._samples_per_frame = self._feature_extractor_cls().hop_length
 
     def _init_state_pool(self, pool_size: int) -> None:
@@ -450,7 +450,7 @@ class ModelRunner:
     ):
         token_lists = [[] for _ in range(frame_batch.size(0))]
         for _ in range(self.sampler.max_symbols_per_timestep):
-            logits = self.joiner.forward_frame(frame_batch, pred_out_batch)
+            logits = self.joiner(frame_batch, pred_out_batch)
             ids = logits.argmax(-1)
             blank_mask = ids == blank_id
             if bool(blank_mask.all()):
@@ -587,5 +587,7 @@ class ModelRunner:
 
     def _as_tensor(self, value):
         if torch.is_tensor(value):
-            return value.to(device=self.device)
-        return torch.tensor([value], device=self.device, dtype=torch.int64)
+            return value.to(device=self.device, non_blocking=True)
+        return torch.tensor(
+            [value], device=self.device, dtype=torch.int64, pin_memory=True
+        )

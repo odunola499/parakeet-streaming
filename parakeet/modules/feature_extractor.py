@@ -58,6 +58,7 @@ class FeatureExtractor:
 
         self.samples = np.empty((0,), dtype=np.float32)
         self.emitted_frames = 0
+        self._sample_offset = 0
 
     def _get_seq_len(self, seq_len: int) -> int:
         pad_amount = self.n_fft
@@ -99,16 +100,55 @@ class FeatureExtractor:
 
     def push(self, samples: np.ndarray, final: bool = False):
         if samples.size:
+            if samples.dtype != np.float32:
+                samples = samples.astype(np.float32, copy=False)
             self.samples = np.concatenate([self.samples, samples])
-        features = self._compute_features(self.samples)
-        total_frames = features.shape[-1]
-        if final:
-            stable_frames = total_frames
-        else:
-            stable_frames = (len(self.samples) - self.n_fft // 2) // self.hop_length + 1
-            stable_frames = max(0, min(stable_frames, total_frames))
-        if stable_frames <= self.emitted_frames:
+        if self.samples.size == 0:
             return None
-        new_feats = features[:, :, self.emitted_frames : stable_frames]
-        self.emitted_frames = stable_frames
+
+        total_samples = self._sample_offset + self.samples.size
+        hop = self.hop_length
+        pad = self.n_fft // 2
+        offset_frames = self._sample_offset // hop
+
+        if final:
+            max_global = total_samples // hop
+        else:
+            if total_samples <= pad:
+                return None
+            max_global = (total_samples - pad) // hop
+
+        if self._sample_offset == 0:
+            min_global = 0
+        else:
+            min_global = (self._sample_offset + pad + hop - 1) // hop
+
+        start_global = max(self.emitted_frames, min_global)
+        if start_global > max_global:
+            return None
+
+        features = self._compute_features(self.samples)
+        start_idx = start_global - offset_frames
+        end_idx = max_global - offset_frames
+        new_feats = features[:, :, start_idx : end_idx + 1]
+        self.emitted_frames = max_global + 1
+        self._trim_samples()
         return new_feats
+
+    def _trim_samples(self) -> None:
+        if self.samples.size == 0:
+            return
+        hop = self.hop_length
+        pad = self.n_fft // 2
+        min_keep = max(0, self.emitted_frames * hop - pad)
+        if min_keep <= self._sample_offset:
+            return
+        aligned = (min_keep // hop) * hop
+        if aligned <= self._sample_offset:
+            return
+        drop = aligned - self._sample_offset
+        if drop >= self.samples.size:
+            self.samples = np.empty((0,), dtype=np.float32)
+        else:
+            self.samples = self.samples[drop:]
+        self._sample_offset = aligned
