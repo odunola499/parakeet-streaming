@@ -19,7 +19,6 @@ def _build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--status-port", type=int, default=None)
     serve.add_argument("--device", default="cpu")
     serve.add_argument("--model-size", choices=("small", "large"), default="small")
-    serve.add_argument("--num-concurrent-requests", type=int, default=50)
     serve.add_argument("--max-num-streams", type=int, default=100)
     serve.add_argument("--sample-rate", type=int, default=16000)
     serve.add_argument("--max-stream-seconds", type=int, default=300)
@@ -41,7 +40,6 @@ def _print_config(
         print(f"  status_port: {status_port}")
     print(f"  device: {device}")
     print(f"  model_size: {config.size}")
-    print(f"  num_concurrent_requests: {config.num_concurrent_requests}")
     print(f"  max_num_streams: {config.max_num_streams}")
     print(f"  sample_rate: {config.sample_rate}")
     print(f"  max_stream_seconds: {config.max_stream_seconds}")
@@ -51,7 +49,6 @@ def _print_config(
 async def _serve_async(args: argparse.Namespace) -> None:
     config = Config(
         size=args.model_size,
-        num_concurrent_requests=args.num_concurrent_requests,
         max_num_streams=args.max_num_streams,
         sample_rate=args.sample_rate,
         max_stream_seconds=args.max_stream_seconds,

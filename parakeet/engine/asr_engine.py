@@ -108,8 +108,6 @@ class ASREngine:
             seq = self.streams.pop(stream_id, None)
         if seq is None:
             return
-        with seq.lock:
-            seq.cleanup()
 
     def get_stream(self, stream_id: int) -> Sequence | None:
         with self._stream_lock:

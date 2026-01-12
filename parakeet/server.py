@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import functools
 from dataclasses import dataclass
 from typing import Any, Iterable
 
@@ -42,19 +43,21 @@ class ASRSocketServer:
     async def serve(self) -> None:
         logging.info("Started server on %s:%s", self.host, self.port)
         async with trio.open_nursery() as nursery:
-            nursery.start_soon(
+            serve_main = functools.partial(
                 trio.serve_tcp, self._handle_client, self.port, host=self.host
             )
+            nursery.start_soon(serve_main)
             if self.status_port is not None:
                 logging.info(
                     "Starting status endpoint on %s:%s", self.host, self.status_port
                 )
-                nursery.start_soon(
+                serve_status = functools.partial(
                     trio.serve_tcp,
                     self._handle_status,
                     self.status_port,
                     host=self.host,
                 )
+                nursery.start_soon(serve_status)
 
     def close(self) -> None:
         self.engine.close()
@@ -214,13 +217,9 @@ class ASRSocketServer:
                 self.engine.cleanup_stream(state.stream_id)
                 self.engine.drop_stream_results(state.stream_id)
                 return
-            timeout = None
-            if deadline is not None:
-                timeout = max(0.0, deadline - trio.current_time())
             last_seq = await trio.to_thread.run_sync(
                 self.engine.wait_for_update,
                 last_seq,
-                timeout=timeout,
                 abandon_on_cancel=True,
             )
 

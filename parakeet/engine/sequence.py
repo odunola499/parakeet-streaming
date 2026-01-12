@@ -132,11 +132,15 @@ class Sequence:
         self.enqueue_samples(np.empty((0,), dtype=np.float32), final=True)
 
     def has_chunk_ready(self) -> bool:
+        if self.enc_buffer is None:
+            return False
         return self.enc_buffer.size(1) >= self.enc_chunk_size or (
             self.final and self.enc_buffer.size(1) > 0
         )
 
     def pop_chunk(self):
+        if self.enc_buffer is None:
+            return None, None
         if not self.has_chunk_ready():
             return None, None
         take = (

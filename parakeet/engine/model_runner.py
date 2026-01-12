@@ -252,12 +252,13 @@ class ModelRunner:
         active_seqs: list[Sequence] = []
         for seq in self.scheduler.active_sequences():
             with seq.lock:
+                if seq.status == SequenceStatus.FINISHED:
+                    continue
                 if not seq.has_chunk_ready():
                     continue
                 chunk, length = seq.pop_chunk()
-            if chunk is None:
-                continue
-            with seq.lock:
+                if chunk is None:
+                    continue
                 seq.in_flight += 1
             chunks.append(chunk)
             lengths.append(int(length.item()))
