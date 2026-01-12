@@ -35,7 +35,7 @@ def pull_from_engine(stream_id, engine, show_text: bool = True):
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--num-streams", type=int, default=3)
+    parser.add_argument("--num-streams", type=int, default=2)
     parser.add_argument(
         "--audio",
         nargs="*",

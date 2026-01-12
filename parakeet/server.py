@@ -40,7 +40,7 @@ class ASRSocketServer:
         self._active_streams: set[int] = set()
 
     async def serve(self) -> None:
-        logging.info("Starting server on %s:%s", self.host, self.port)
+        logging.info("Started server on %s:%s", self.host, self.port)
         async with trio.open_nursery() as nursery:
             nursery.start_soon(
                 trio.serve_tcp, self._handle_client, self.port, host=self.host
@@ -189,26 +189,38 @@ class ASRSocketServer:
             return
 
     async def _finalize_stream(self, state: ConnectionState) -> None:
-        if state.stream_id not in self.engine.streams:
+        if self.engine.get_stream(state.stream_id) is None:
+            self.engine.drop_stream_results(state.stream_id)
             return
         if not state.final_requested:
             self._request_final(state)
         last_seq = self.engine.get_update_seq()
+        deadline = None
+        if state.disconnected:
+            deadline = trio.current_time() + 5.0
         while True:
-            seq = self.engine.streams.get(state.stream_id)
+            seq = self.engine.get_stream(state.stream_id)
             if seq is None:
+                self.engine.drop_stream_results(state.stream_id)
                 return
             with seq.lock:
                 finished = seq.is_finished
             if finished:
                 self.engine.cleanup_stream(state.stream_id)
-                with self.engine._result_lock:
-                    self.engine._stream_results.pop(state.stream_id, None)
+                self.engine.drop_stream_results(state.stream_id)
                 return
             self.engine.collect_stream_results(state.stream_id)
+            if deadline is not None and trio.current_time() >= deadline:
+                self.engine.cleanup_stream(state.stream_id)
+                self.engine.drop_stream_results(state.stream_id)
+                return
+            timeout = None
+            if deadline is not None:
+                timeout = max(0.0, deadline - trio.current_time())
             last_seq = await trio.to_thread.run_sync(
                 self.engine.wait_for_update,
                 last_seq,
+                timeout=timeout,
                 abandon_on_cancel=True,
             )
 

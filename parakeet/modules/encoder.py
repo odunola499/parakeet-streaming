@@ -109,6 +109,7 @@ class ConformerEncoder(nn.Module):
         super().__init__()
 
         d_ff = hidden_size * ff_expansion_factor
+        self.embed_dim = hidden_size
         self.pre_encode = ConvSubsampling(
             hidden_size=hidden_size,
             subsampling_factor=subsampling_factor,
@@ -139,7 +140,8 @@ class ConformerEncoder(nn.Module):
             )
             self.layers.append(layer)
 
-        self.att_context_size: int = att_context_size
+        self.att_context_size: list = att_context_size
+        self.conv_kernel_size = conv_kernel_size
         self.stream = stream
         self.chunk_size = chunk_size
         self.shift_size = shift_size
@@ -152,16 +154,23 @@ class ConformerEncoder(nn.Module):
         self.last_time_num = last_time_num
 
     def init_streaming_state(
-        self, batch_size: int = 1, device: torch.device | None = None
+        self,
+        batch_size: int = 1,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
     ):
-        if self.att_context_size[1] < 0:
-            raise ValueError(
-                "Right context must be non-negative for chunked_limited streaming."
-            )
         if device is None:
             device = next(self.parameters()).device
+        if dtype is None:
+            dtype = next(self.parameters()).dtype
         cache = ModelCache(
-            num_layers=len(self.layers), left_attn=self.att_context_size[0]
+            num_layers=len(self.layers),
+            attn_context_size=self.att_context_size,
+            embed_dim=self.embed_dim,
+            conv_kernel_size=self.conv_kernel_size,
+            batch_size=batch_size,
+            device=device,
+            dtype=dtype,
         )
         processed_frames = torch.zeros(batch_size, dtype=torch.int64, device=device)
         cache_lengths = torch.zeros(batch_size, dtype=torch.int64, device=device)
@@ -211,13 +220,12 @@ class ConformerEncoder(nn.Module):
             valid_current = torch.arange(current_len, device=device) < lengths[idx]
             pad_mask[idx] = ~valid_current
 
-            valid_total = torch.cat(
-                [
-                    torch.ones(cache_len, device=device, dtype=torch.bool),
-                    valid_current,
-                ],
-                dim=0,
+            valid_total = torch.zeros(
+                cache_len + current_len, device=device, dtype=torch.bool
             )
+            if cache_len:
+                valid_total[:cache_len] = True
+            valid_total[cache_len : cache_len + current_len] = valid_current
 
             offset = max_cache_len - cache_len
             allowed_full = torch.zeros(
@@ -263,10 +271,9 @@ class ConformerEncoder(nn.Module):
             )
 
         if isinstance(length, Tensor):
-            state.processed_frames = state.processed_frames + length
-            state.cache_lengths = torch.clamp(
-                state.cache_lengths + length, max=self.att_context_size[0]
-            )
+            state.processed_frames.add_(length)
+            state.cache_lengths.add_(length)
+            state.cache_lengths.clamp_(max=self.att_context_size[0])
         else:
             state.processed_frames += x.size(1)
             state.cache_lengths = min(

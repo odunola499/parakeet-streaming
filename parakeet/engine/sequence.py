@@ -67,10 +67,6 @@ class Sequence:
         self.final = False
         self.in_flight = 0
 
-    def push_pcm(self, pcm_bytes: bytes, final: bool = False):
-        samples = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32)
-        self.enqueue_samples(samples, final=final)
-
     def push_samples(self, samples: np.ndarray, final: bool = False):
         self.enqueue_samples(samples, final=final)
 
@@ -151,13 +147,13 @@ class Sequence:
         chunk = self.enc_buffer[:, :take, :]
         self.enc_buffer = self.enc_buffer[:, take:, :]
         if self.final and take < self.enc_chunk_size:
-            pad = self.enc_chunk_size - take
-            pad_chunk = torch.zeros(
-                (chunk.size(0), pad, chunk.size(2)),
+            padded = torch.zeros(
+                (chunk.size(0), self.enc_chunk_size, chunk.size(2)),
                 device=chunk.device,
                 dtype=chunk.dtype,
             )
-            chunk = torch.cat([chunk, pad_chunk], dim=1)
+            padded[:, :take, :].copy_(chunk)
+            chunk = padded
             take = self.enc_chunk_size
         length = torch.full((1,), take, dtype=torch.int64, device=self.device)
         return chunk, length

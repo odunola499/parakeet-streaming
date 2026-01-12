@@ -36,7 +36,6 @@ class LargeModelConfig(ModelConfig):
 @dataclass
 class Config:
     size: Literal["small", "large"] = "small"
-    num_concurrent_requests: int = 50
     max_num_streams: int = 100
     sample_rate: int = 16000
     max_stream_seconds: int = 300

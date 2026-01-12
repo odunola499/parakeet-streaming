@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-from collections import deque
 from dataclasses import dataclass
-from typing import Iterable
 import queue
 import threading
 
 import torch
-from torch.nn import functional as F
 
 from parakeet.config import Config
 from parakeet.engine.scheduler import Scheduler
@@ -28,7 +25,12 @@ class ModelRunner:
         self.scheduler = scheduler
 
         self._init_model()
-        self._init_state_pool(pool_size=config.max_num_streams)
+        self.scheduler.init_state_pool(
+            self.encoder,
+            self.device,
+            self._dtype,
+            pool_size=config.max_num_streams,
+        )
 
         self._stop_event = threading.Event()
         self._threads: list[threading.Thread] = []
@@ -48,11 +50,6 @@ class ModelRunner:
         param = next(self.model.parameters())
         self._dtype = param.dtype
 
-        self._attn_cache_len = self.encoder.att_context_size[0] + 2
-        self._layer_hidden = [layer.hidden_size for layer in self.encoder.layers]
-        self._conv_cache_len = [self.config.model_config.conv_kernel_size - 1] * len(
-            self.encoder.layers
-        )
         self._subsampling_factor = self.model.config.subsampling_factor
         self._lookahead = self.encoder.att_context_size[1]
         self._chunk_frames_first = 1 + self._subsampling_factor * self._lookahead
@@ -66,99 +63,9 @@ class ModelRunner:
             (1,), self.blank_id, dtype=torch.long, device=self.device
         )
 
-    def _init_state_pool(self, pool_size: int) -> None:
-        self._state_pool: list = []
-        self._free_states: deque = deque()
-
-        for _ in range(pool_size):
-            state = self.encoder.init_streaming_state(batch_size=1, device=self.device)
-            self._ensure_state_buffers(state)
-            self._reset_state(state)
-            self._state_pool.append(state)
-            self._free_states.append(state)
-
-    def _ensure_state_buffers(self, state) -> None:
-        for layer_idx, hidden in enumerate(self._layer_hidden):
-            attn_cache = state.cache.attn_caches[layer_idx]
-            if attn_cache.k_cache is None:
-                attn_cache.k_cache = torch.zeros(
-                    (1, self._attn_cache_len, hidden),
-                    device=self.device,
-                    dtype=self._dtype,
-                )
-                attn_cache.v_cache = torch.zeros(
-                    (1, self._attn_cache_len, hidden),
-                    device=self.device,
-                    dtype=self._dtype,
-                )
-
-            conv_cache = state.cache.conv_caches[layer_idx].get()
-            if conv_cache is None:
-                conv_cache = torch.zeros(
-                    (1, hidden, self._conv_cache_len[layer_idx]),
-                    device=self.device,
-                    dtype=self._dtype,
-                )
-                state.cache.conv_caches[layer_idx].update(conv_cache)
-
-    def _reset_state(self, state) -> None:
-        if torch.is_tensor(state.processed_frames):
-            state.processed_frames.zero_()
-        else:
-            state.processed_frames = 0
-
-        if torch.is_tensor(state.cache_lengths):
-            state.cache_lengths.zero_()
-        else:
-            state.cache_lengths = 0
-
-        state.cache.current_max_len = 0
-
-        for layer_idx, hidden in enumerate(self._layer_hidden):
-            attn_cache = state.cache.attn_caches[layer_idx]
-            if attn_cache.k_cache is None:
-                attn_cache.k_cache = torch.zeros(
-                    (1, self._attn_cache_len, hidden),
-                    device=self.device,
-                    dtype=self._dtype,
-                )
-            else:
-                attn_cache.k_cache.zero_()
-
-            if attn_cache.v_cache is None:
-                attn_cache.v_cache = torch.zeros(
-                    (1, self._attn_cache_len, hidden),
-                    device=self.device,
-                    dtype=self._dtype,
-                )
-            else:
-                attn_cache.v_cache.zero_()
-
-            conv_cache = state.cache.conv_caches[layer_idx].get()
-            if conv_cache is None:
-                conv_cache = torch.zeros(
-                    (1, hidden, self._conv_cache_len[layer_idx]),
-                    device=self.device,
-                    dtype=self._dtype,
-                )
-                state.cache.conv_caches[layer_idx].update(conv_cache)
-            else:
-                conv_cache.zero_()
-
-    def _acquire_state(self):
-        if not self._free_states:
-            return None
-        state = self._free_states.popleft()
-        self._reset_state(state)
-        return state
-
-    def _release_state(self, state) -> None:
-        self._reset_state(state)
-        self._free_states.append(state)
-
     def create_sequence(self) -> Sequence | None:
-        encoder_state = self._acquire_state()
-        if encoder_state is None:
+        encoder_state_id = self.scheduler.acquire_state_slot()
+        if encoder_state_id is None:
             return None
 
         pred_state = self.decoder.init_state(1)
@@ -180,7 +87,7 @@ class ModelRunner:
         return Sequence(
             enc_hidden_dim=self.model.config.enc_hidden_dim,
             enc_chunk_size=enc_chunk_size,
-            encoder_state=encoder_state,
+            encoder_state=encoder_state_id,
             pred_state=pred_state,
             pred_out=pred_out,
             pre_encode_cache_size=pre_encode_cache_size,
@@ -289,7 +196,17 @@ class ModelRunner:
                 feats_in = feats
                 has_cache = False
             else:
-                feats_in = torch.cat([pre_encode_cache, feats], dim=-1)
+                cache_len = pre_encode_cache.size(-1)
+                feat_len = feats.size(-1)
+                feats_in = torch.empty(
+                    feats.size(0),
+                    feats.size(1),
+                    cache_len + feat_len,
+                    device=feats.device,
+                    dtype=feats.dtype,
+                )
+                feats_in[..., :cache_len].copy_(pre_encode_cache)
+                feats_in[..., cache_len:].copy_(feats)
                 has_cache = True
 
             lengths = torch.full(
@@ -311,7 +228,23 @@ class ModelRunner:
                     else:
                         seq.pre_encode_cache = feats_in.detach()
                 if pre_encoded is not None and pre_encoded.numel() > 0:
-                    seq.enc_buffer = torch.cat([seq.enc_buffer, pre_encoded], dim=1)
+                    if seq.enc_buffer.numel() == 0:
+                        seq.enc_buffer = pre_encoded
+                    else:
+                        old_len = seq.enc_buffer.size(1)
+                        new_len = pre_encoded.size(1)
+                        new_buffer = torch.empty(
+                            (
+                                seq.enc_buffer.size(0),
+                                old_len + new_len,
+                                pre_encoded.size(2),
+                            ),
+                            device=pre_encoded.device,
+                            dtype=pre_encoded.dtype,
+                        )
+                        new_buffer[:, :old_len, :].copy_(seq.enc_buffer)
+                        new_buffer[:, old_len:, :].copy_(pre_encoded)
+                        seq.enc_buffer = new_buffer
 
     def _encode_step(self) -> None:
         chunks = []
@@ -330,25 +263,21 @@ class ModelRunner:
             lengths.append(int(length.item()))
             active_seqs.append(seq)
 
-        if self.config.num_concurrent_requests > 0:
-            chunks = chunks[: self.config.num_concurrent_requests]
-            lengths = lengths[: self.config.num_concurrent_requests]
-            active_seqs = active_seqs[: self.config.num_concurrent_requests]
-
         if not chunks:
             return
 
         max_len = max(lengths)
-        padded_chunks = []
-        for chunk, length in zip(chunks, lengths):
-            if length < max_len:
-                pad = max_len - length
-                chunk = F.pad(chunk, (0, 0, 0, pad))
-            padded_chunks.append(chunk)
-
-        batch = torch.cat(padded_chunks, dim=0)
+        batch_size = len(chunks)
+        hidden = chunks[0].size(2)
+        batch = torch.zeros(
+            (batch_size, max_len, hidden),
+            device=chunks[0].device,
+            dtype=chunks[0].dtype,
+        )
+        for idx, (chunk, length) in enumerate(zip(chunks, lengths)):
+            batch[idx : idx + 1, :length, :].copy_(chunk)
         length_tensor = torch.tensor(lengths, device=self.device, dtype=torch.int64)
-        batch_state = self._pack_states(active_seqs)
+        batch_state, slot_index = self.scheduler.pack_states(active_seqs)
 
         with torch.inference_mode():
             chunk_out, batch_state = self.encoder(
@@ -363,7 +292,7 @@ class ModelRunner:
             with seq.lock:
                 seq.enqueue_encoded(out)
 
-        self._unpack_states(batch_state, active_seqs)
+        self.scheduler.unpack_states(batch_state, slot_index)
         for seq in active_seqs:
             with seq.lock:
                 seq.in_flight = max(0, seq.in_flight - 1)
@@ -374,17 +303,11 @@ class ModelRunner:
         batch_seqs: list[Sequence] = []
         batch_chunks: list[torch.Tensor] = []
         for seq in list(self.scheduler.active_sequences()):
-            with seq.lock:
-                if seq.status == SequenceStatus.FINISHED:
-                    if seq.in_flight == 0:
-                        self._release_sequence(seq)
-                        state_changed = True
-                    continue
-                if seq.has_encoded():
-                    chunk = seq.pop_encoded()
-                    if chunk is not None:
-                        batch_seqs.append(seq)
-                        batch_chunks.append(chunk)
+            if seq.has_encoded():
+                chunk = seq.pop_encoded()
+                if chunk is not None:
+                    batch_seqs.append(seq)
+                    batch_chunks.append(chunk)
 
         if batch_seqs:
             token_lists = self._decode_batch(batch_seqs, batch_chunks)
@@ -394,23 +317,6 @@ class ModelRunner:
                         seq.append_tokens(tokens)
                     results.append(DecodeResult(seq.request_id, tokens))
 
-        for seq in list(self.scheduler.active_sequences()):
-            with seq.lock:
-                if (
-                    seq.final
-                    and not seq.has_pending_audio()
-                    and not seq.has_chunk_ready()
-                    and not seq.has_encoded()
-                ):
-                    seq.status = SequenceStatus.FINISHED
-                    state_changed = True
-                if (
-                    seq.is_finished
-                    and not seq.has_pending_audio()
-                    and seq.in_flight == 0
-                ):
-                    self._release_sequence(seq)
-                    state_changed = True
         return results, state_changed
 
     def _decode_batch(
@@ -427,10 +333,23 @@ class ModelRunner:
                 active = [i for i, length in enumerate(lengths) if t < length]
                 if not active:
                     break
-                frame_batch = torch.cat(
-                    [chunks[i][:, :, t].unsqueeze(1) for i in active], dim=0
+                active_count = len(active)
+                frame_hidden = chunks[0].size(1)
+                frame_batch = torch.empty(
+                    (active_count, 1, frame_hidden),
+                    device=chunks[0].device,
+                    dtype=chunks[0].dtype,
                 )
-                pred_out_batch = torch.cat([pred_outs[i] for i in active], dim=0)
+                pred_proto = pred_outs[active[0]]
+                pred_out_batch = torch.empty(
+                    (active_count,) + pred_proto.shape[1:],
+                    device=pred_proto.device,
+                    dtype=pred_proto.dtype,
+                )
+                for row, idx in enumerate(active):
+                    frame = chunks[idx][:, :, t].unsqueeze(1)
+                    frame_batch[row : row + 1].copy_(frame)
+                    pred_out_batch[row : row + 1].copy_(pred_outs[idx])
                 state_batch = self._stack_states([pred_states[i] for i in active])
 
                 pred_out_batch, state_batch, new_tokens = self._decode_frame_batch(
@@ -489,10 +408,29 @@ class ModelRunner:
     def _stack_states(self, states):
         if isinstance(states[0], tuple):
             stacked = []
-            for idx in range(len(states[0])):
-                stacked.append(torch.cat([st[idx] for st in states], dim=1))
+            num_parts = len(states[0])
+            batch_size = len(states)
+            for idx in range(num_parts):
+                part0 = states[0][idx]
+                out = torch.empty(
+                    (part0.size(0), batch_size, part0.size(2)),
+                    device=part0.device,
+                    dtype=part0.dtype,
+                )
+                for b, st in enumerate(states):
+                    out[:, b : b + 1, :].copy_(st[idx])
+                stacked.append(out)
             return tuple(stacked)
-        return torch.cat(states, dim=1)
+        base = states[0]
+        batch_size = len(states)
+        out = torch.empty(
+            (base.size(0), batch_size, base.size(2)),
+            device=base.device,
+            dtype=base.dtype,
+        )
+        for b, st in enumerate(states):
+            out[:, b : b + 1, :].copy_(st)
+        return out
 
     def _unstack_states(self, state_batch):
         if isinstance(state_batch, tuple):
@@ -507,100 +445,9 @@ class ModelRunner:
     def _release_sequence(self, seq: Sequence) -> None:
         self.scheduler.release(seq)
         if seq.encoder_state is not None:
-            self._release_state(seq.encoder_state)
+            self.scheduler.release_state_slot(seq.encoder_state)
             seq.encoder_state = None
         seq.cleanup()
-
-    def _pack_states(self, seqs: Iterable[Sequence]):
-        seqs = list(seqs)
-        batch_size = len(seqs)
-        batch_state = self.encoder.init_streaming_state(
-            batch_size=batch_size, device=self.device
-        )
-
-        processed_frames = torch.cat(
-            [self._as_tensor(seq.encoder_state.processed_frames) for seq in seqs],
-            dim=0,
-        )
-        cache_lengths = torch.cat(
-            [self._as_tensor(seq.encoder_state.cache_lengths) for seq in seqs],
-            dim=0,
-        )
-        batch_state.processed_frames = processed_frames
-        batch_state.cache_lengths = cache_lengths
-
-        num_layers = len(self.encoder.layers)
-        for layer_idx in range(num_layers):
-            hidden = self._layer_hidden[layer_idx]
-            attn_k = []
-            attn_v = []
-            conv_c = []
-            for seq in seqs:
-                layer_cache = seq.encoder_state.cache.attn_caches[layer_idx]
-                k_cache = layer_cache.k_cache
-                v_cache = layer_cache.v_cache
-                if k_cache is None:
-                    k_cache = torch.zeros(
-                        (1, self._attn_cache_len, hidden),
-                        device=self.device,
-                        dtype=self._dtype,
-                    )
-                    v_cache = torch.zeros(
-                        (1, self._attn_cache_len, hidden),
-                        device=self.device,
-                        dtype=self._dtype,
-                    )
-                attn_k.append(k_cache)
-                attn_v.append(v_cache)
-
-                conv_cache = seq.encoder_state.cache.conv_caches[layer_idx].get()
-                if conv_cache is None:
-                    conv_cache = torch.zeros(
-                        (1, hidden, self._conv_cache_len[layer_idx]),
-                        device=self.device,
-                        dtype=self._dtype,
-                    )
-                conv_c.append(conv_cache)
-
-            batch_state.cache.attn_caches[layer_idx].k_cache = torch.cat(attn_k, dim=0)
-            batch_state.cache.attn_caches[layer_idx].v_cache = torch.cat(attn_v, dim=0)
-            batch_state.cache.conv_caches[layer_idx].cache = torch.cat(conv_c, dim=0)
-
-        return batch_state
-
-    def _unpack_states(self, batch_state, seqs: Iterable[Sequence]) -> None:
-        seqs = list(seqs)
-        for idx, seq in enumerate(seqs):
-            seq.encoder_state.processed_frames = batch_state.processed_frames[
-                idx : idx + 1
-            ].detach()
-            seq.encoder_state.cache_lengths = batch_state.cache_lengths[
-                idx : idx + 1
-            ].detach()
-            for layer_idx in range(len(self.encoder.layers)):
-                seq_cache = seq.encoder_state.cache.attn_caches[layer_idx]
-                seq_cache.k_cache = (
-                    batch_state.cache.attn_caches[layer_idx]
-                    .k_cache[idx : idx + 1]
-                    .detach()
-                )
-                seq_cache.v_cache = (
-                    batch_state.cache.attn_caches[layer_idx]
-                    .v_cache[idx : idx + 1]
-                    .detach()
-                )
-                seq.encoder_state.cache.conv_caches[layer_idx].cache = (
-                    batch_state.cache.conv_caches[layer_idx]
-                    .cache[idx : idx + 1]
-                    .detach()
-                )
-
-    def _as_tensor(self, value):
-        if torch.is_tensor(value):
-            return value.to(device=self.device, non_blocking=True)
-        return torch.tensor(
-            [value], device=self.device, dtype=torch.int64, pin_memory=True
-        )
 
     def _notify_update(self) -> None:
         with self._update_cond:

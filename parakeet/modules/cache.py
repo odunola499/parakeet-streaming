@@ -1,81 +1,80 @@
 from dataclasses import dataclass
 
+import torch
 from torch import Tensor
 
 
-class AttnCacheLayer:
-    def __init__(self, layer_idx: int, left_attn: int):
-        super().__init__()
-        self.layer_idx = layer_idx
-        self.left_attn = left_attn
-
-        self.k_cache = None
-        self.v_cache = None
-
-    def update(self, state: tuple):
-        k, v = state
-        B, T, D = k.shape
-
-        if self.k_cache is None:
-            self.k_cache = k.new_zeros((B, self.left_attn + T, D))
-            self.v_cache = v.new_zeros((B, self.left_attn + T, D))
-
-        self.k_cache[:, : self.left_attn].copy_(
-            self.k_cache[:, -self.left_attn :].clone()
-        )
-        self.v_cache[:, : self.left_attn].copy_(
-            self.v_cache[:, -self.left_attn :].clone()
-        )
-
-        self.k_cache[:, self.left_attn :].copy_(k)
-        self.v_cache[:, self.left_attn :].copy_(v)
-
-        full_k = self.k_cache
-        full_v = self.v_cache
-
-        return full_k, full_v
-
-
-class ConvCacheLayer:
-    def __init__(self, layer_idx: int):
-        super().__init__()
-        self.layer_idx = layer_idx
-        self.cache = None
-
-    def get(self):
-        return self.cache
-
-    def update(self, state: Tensor):
-        self.cache = state
-
-
 class ModelCache:
-    def __init__(self, num_layers: int = 17, left_attn: int = 70):
+    def __init__(
+        self,
+        num_layers: int,
+        attn_context_size: list | tuple,
+        embed_dim: int,
+        conv_kernel_size: int,
+        batch_size: int = 1,
+        device=None,
+        dtype=None,
+    ):
         super().__init__()
-        self.left_attn = left_attn
+        self.left_attn = int(attn_context_size[0])
+        self.right_attn = int(attn_context_size[1])
+        self.attn_context_size = (self.left_attn, self.right_attn)
+        self.attn_cache_len = self.left_attn + self.right_attn + 1
+        self.conv_cache_len = int(conv_kernel_size - 1)
+        self.attn_k = torch.zeros(
+            (batch_size, num_layers, self.attn_cache_len, embed_dim),
+            device=device,
+            dtype=dtype,
+        )
+        self.attn_v = torch.zeros_like(self.attn_k)
+        self.conv = torch.zeros(
+            (batch_size, num_layers, embed_dim, self.conv_cache_len),
+            device=device,
+            dtype=dtype,
+        )
 
-        self.attn_caches = {
-            i: AttnCacheLayer(i, left_attn=left_attn) for i in range(num_layers)
-        }
-        self.conv_caches = {i: ConvCacheLayer(i) for i in range(num_layers)}
+    def update_attn_cache(self, layer_idx: int, key: Tensor, value: Tensor):
+        self.attn_k[:, layer_idx, : self.left_attn].copy_(
+            self.attn_k[:, layer_idx, -self.left_attn :].clone()
+        )
+        self.attn_v[:, layer_idx, : self.left_attn].copy_(
+            self.attn_v[:, layer_idx, -self.left_attn :].clone()
+        )
+        self.attn_k[:, layer_idx, self.left_attn :].copy_(key)
+        self.attn_v[:, layer_idx, self.left_attn :].copy_(value)
+        return self.attn_k[:, layer_idx], self.attn_v[:, layer_idx]
 
-    def get_conv_cache(self, layer_idx):
-        return self.conv_caches[layer_idx].get()
+    def get_conv_cache(self, layer_idx: int) -> Tensor:
+        return self.conv[:, layer_idx]
 
-    def update_conv_cache(self, layer_idx, state):
-        self.conv_caches[layer_idx].update(state)
+    def update_conv_cache(self, layer_idx: int, state: Tensor) -> None:
+        if state is None:
+            return
+        self.conv[:, layer_idx].copy_(state)
 
-    def update_attn_cache(self, layer_idx, layer_cache):
+    def reset(self) -> None:
+        self.attn_k.zero_()
+        self.attn_v.zero_()
+        self.conv.zero_()
 
-        return self.attn_caches[layer_idx].update(layer_cache)
+    def reset_slot(self, slot: int) -> None:
+        self.attn_k[slot].zero_()
+        self.attn_v[slot].zero_()
+        self.conv[slot].zero_()
 
-    def reset(self):
-        for layer in self.attn_caches.values():
-            layer.k_cache = None
-            layer.v_cache = None
-
-        for layer in self.conv_caches.values():
-            layer.cache = None
+    def view(self, batch_size: int) -> "ModelCache":
+        if batch_size == self.attn_k.size(0):
+            return self
+        view = ModelCache.__new__(ModelCache)
+        view.left_attn = self.left_attn
+        view.right_attn = self.right_attn
+        view.attn_context_size = self.attn_context_size
+        view.attn_cache_len = self.attn_cache_len
+        view.conv_cache_len = self.conv_cache_len
+        view.attn_k = self.attn_k[:batch_size]
+        view.attn_v = self.attn_v[:batch_size]
+        view.conv = self.conv[:batch_size]
+        return view
 
 
 @dataclass
@@ -91,8 +90,6 @@ class StreamingState:
 
 
 __all__ = [
-    "AttnCacheLayer",
-    "ConvCacheLayer",
     "ModelCache",
     "StreamingState",
 ]

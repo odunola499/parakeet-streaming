@@ -22,6 +22,7 @@ class ASREngine:
         self.runner = ModelRunner(config, self.device, self.scheduler)
         self.tokenizer = self.runner.model._tokenizer
         self.streams: Dict[int, Sequence] = {}
+        self._stream_lock = threading.Lock()
         self._result_lock = threading.Lock()
         self._stream_results: Dict[int, deque[StreamResult]] = {}
 
@@ -35,20 +36,19 @@ class ASREngine:
         if seq is None:
             raise RuntimeError("No free streaming state available.")
         self.runner.add_sequence(seq)
-        self.streams[seq.request_id] = seq
+        with self._stream_lock:
+            self.streams[seq.request_id] = seq
         with self._result_lock:
             self._stream_results[seq.request_id] = deque()
         return seq.request_id
 
-    def push_pcm(self, stream_id: int, pcm_bytes: bytes, final: bool = False) -> None:
-        seq = self.streams[stream_id]
-        with seq.lock:
-            seq.push_pcm(pcm_bytes, final=final)
-
     def push_samples(
         self, stream_id: int, samples: np.ndarray, final: bool = False
     ) -> None:
-        seq = self.streams[stream_id]
+        with self._stream_lock:
+            seq = self.streams.get(stream_id)
+        if seq is None:
+            return
         with seq.lock:
             seq.push_samples(samples, final=final)
 
@@ -64,7 +64,8 @@ class ASREngine:
     def _drain_to_stream_results_locked(self) -> None:
         items = self.runner.drain_results()
         for item in items:
-            seq = self.streams.get(item.seq_id)
+            with self._stream_lock:
+                seq = self.streams.get(item.seq_id)
             if seq is None:
                 continue
             with seq.lock:
@@ -103,6 +104,17 @@ class ASREngine:
             return results
 
     def cleanup_stream(self, stream_id: int) -> None:
-        seq = self.streams.pop(stream_id, None)
+        with self._stream_lock:
+            seq = self.streams.pop(stream_id, None)
         if seq is None:
             return
+        with seq.lock:
+            seq.cleanup()
+
+    def get_stream(self, stream_id: int) -> Sequence | None:
+        with self._stream_lock:
+            return self.streams.get(stream_id)
+
+    def drop_stream_results(self, stream_id: int) -> None:
+        with self._result_lock:
+            self._stream_results.pop(stream_id, None)

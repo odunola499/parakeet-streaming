@@ -94,7 +94,8 @@ class ConformerAttention(nn.Module):
         qkv = self.qkv(x)
         query, key, value = qkv.chunk(3, dim=-1)
 
-        key, value = cache.update_attn_cache(self.layer_idx, (key, value))
+        if cache is not None:
+            key, value = cache.update_attn_cache(self.layer_idx, key, value)
         query = query.view(B, -1, self.num_heads, self.d_k)
         key = key.view(B, -1, self.num_heads, self.d_k).transpose(1, 2)
         value = value.view(B, -1, self.num_heads, self.d_k).transpose(1, 2)
