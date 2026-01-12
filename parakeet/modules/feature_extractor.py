@@ -56,10 +56,6 @@ class FeatureExtractor:
         ).astype(np.float32)
         self.fb = torch.from_numpy(fb)
 
-        self.samples = np.empty((0,), dtype=np.float32)
-        self.emitted_frames = 0
-        self._sample_offset = 0
-
     def _get_seq_len(self, seq_len: int) -> int:
         pad_amount = self.n_fft
         return (seq_len + pad_amount - self.n_fft) // self.hop_length
@@ -98,57 +94,58 @@ class FeatureExtractor:
         features = self._compute_features(audio)
         return features
 
-    def push(self, samples: np.ndarray, final: bool = False):
+    def push(self, samples: np.ndarray, state, final: bool = False):
         if samples.size:
-            if samples.dtype != np.float32:
-                samples = samples.astype(np.float32, copy=False)
-            self.samples = np.concatenate([self.samples, samples])
-        if self.samples.size == 0:
+            if state._fe_samples.size:
+                state._fe_samples = np.concatenate([state._fe_samples, samples])
+            else:
+                state._fe_samples = samples.copy()
+        else:
             return None
 
-        total_samples = self._sample_offset + self.samples.size
+        total_samples = state._fe_sample_offset + state._fe_samples.size
         hop = self.hop_length
         pad = self.n_fft // 2
-        offset_frames = self._sample_offset // hop
+        offset_frames = state._fe_sample_offset // hop
 
         if final:
-            max_global = total_samples // hop
+            max_frame = total_samples // hop
         else:
             if total_samples <= pad:
                 return None
-            max_global = (total_samples - pad) // hop
+            max_frame = (total_samples - pad) // hop
 
-        if self._sample_offset == 0:
-            min_global = 0
+        if state._fe_sample_offset == 0:
+            min_frame = 0
         else:
-            min_global = (self._sample_offset + pad + hop - 1) // hop
+            min_frame = (state._fe_sample_offset + pad + hop - 1) // hop
 
-        start_global = max(self.emitted_frames, min_global)
-        if start_global > max_global:
+        start_frame = max(state._fe_emitted_frames, min_frame)
+        if start_frame > max_frame:
             return None
 
-        features = self._compute_features(self.samples)
-        start_idx = start_global - offset_frames
-        end_idx = max_global - offset_frames
+        features = self._compute_features(state._fe_samples)
+        start_idx = start_frame - offset_frames
+        end_idx = max_frame - offset_frames
         new_feats = features[:, :, start_idx : end_idx + 1]
-        self.emitted_frames = max_global + 1
-        self._trim_samples()
+        state._fe_emitted_frames = max_frame + 1
+        self._trim_samples(state)
         return new_feats
 
-    def _trim_samples(self) -> None:
-        if self.samples.size == 0:
+    def _trim_samples(self, state) -> None:
+        if state._fe_samples.size == 0:
             return
         hop = self.hop_length
         pad = self.n_fft // 2
-        min_keep = max(0, self.emitted_frames * hop - pad)
-        if min_keep <= self._sample_offset:
+        min_keep = max(0, state._fe_emitted_frames * hop - pad)
+        if min_keep <= state._fe_sample_offset:
             return
         aligned = (min_keep // hop) * hop
-        if aligned <= self._sample_offset:
+        if aligned <= state._fe_sample_offset:
             return
-        drop = aligned - self._sample_offset
-        if drop >= self.samples.size:
-            self.samples = np.empty((0,), dtype=np.float32)
+        drop = aligned - state._fe_sample_offset
+        if drop >= state._fe_samples.size:
+            state._fe_samples = np.empty((0,), dtype=np.float32)
         else:
-            self.samples = self.samples[drop:]
-        self._sample_offset = aligned
+            state._fe_samples = state._fe_samples[drop:]
+        state._fe_sample_offset = aligned

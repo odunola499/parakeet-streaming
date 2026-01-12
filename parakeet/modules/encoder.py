@@ -18,7 +18,6 @@ class ConformerLayer(nn.Module):
         dropout: float,
         conv_kernel_size: int,
         use_bias: bool,
-        stream: bool,
     ):
         super().__init__()
         self.layer_idx = layer_idx
@@ -30,7 +29,7 @@ class ConformerLayer(nn.Module):
         )
         self.norm_conv = nn.LayerNorm(hidden_size)
         self.conv = ConformerConvolution(
-            hidden_size=hidden_size, kernel_size=conv_kernel_size, stream=stream
+            hidden_size=hidden_size, kernel_size=conv_kernel_size
         )
         self.norm_self_att = nn.LayerNorm(hidden_size)
         self.self_attn = ConformerAttention(
@@ -54,7 +53,7 @@ class ConformerLayer(nn.Module):
         pos_emb: Tensor,
         pad_mask: Tensor,
         attn_mask: Tensor,
-        cache: ModelCache = None,
+        cache: ModelCache,
     ):
         residual = x
         x = self.norm_feed_forward1(x)
@@ -69,12 +68,9 @@ class ConformerLayer(nn.Module):
         residual += x
 
         x = self.norm_conv(residual)
-        if cache:
-            conv_cache = cache.get_conv_cache(self.layer_idx)
-            x, updated_conv_cache = self.conv(x, pad_mask=pad_mask, cache=conv_cache)
-            cache.update_conv_cache(self.layer_idx, updated_conv_cache)
-        else:
-            x = self.conv(x, pad_mask=pad_mask)
+        conv_cache = cache.get_conv_cache(self.layer_idx)
+        x, updated_conv_cache = self.conv(x, pad_mask=pad_mask, cache=conv_cache)
+        cache.update_conv_cache(self.layer_idx, updated_conv_cache)
         residual += x
 
         x = self.norm_feed_forward2(residual)
@@ -140,11 +136,10 @@ class ConformerEncoder(nn.Module):
                 dropout=0.0,
                 conv_kernel_size=conv_kernel_size,
                 use_bias=use_bias,
-                stream=stream,
             )
             self.layers.append(layer)
 
-        self.att_context_size = att_context_size
+        self.att_context_size: int = att_context_size
         self.stream = stream
         self.chunk_size = chunk_size
         self.shift_size = shift_size
@@ -165,12 +160,9 @@ class ConformerEncoder(nn.Module):
             )
         if device is None:
             device = next(self.parameters()).device
-        cache_len = self.att_context_size[0]
-        if cache_len < 0:
-            raise ValueError(
-                "Unlimited left context is not supported for streaming caches."
-            )
-        cache = ModelCache(num_layers=len(self.layers), L_attn=cache_len)
+        cache = ModelCache(
+            num_layers=len(self.layers), left_attn=self.att_context_size[0]
+        )
         processed_frames = torch.zeros(batch_size, dtype=torch.int64, device=device)
         cache_lengths = torch.zeros(batch_size, dtype=torch.int64, device=device)
         return StreamingState(
@@ -185,29 +177,13 @@ class ConformerEncoder(nn.Module):
         cache_lengths: Tensor,
         processed_frames: Tensor,
         device: torch.device,
-        lengths: Tensor | None = None,
+        lengths: Tensor,
     ):
         chunk_size = self.att_context_size[1] + 1
-        if chunk_size <= 0:
-            raise ValueError(
-                "Right context must be non-negative for chunked_limited streaming."
-            )
+        max_cache_len = self.att_context_size[0]
+        left_chunks_num = self.att_context_size[0] // chunk_size
+        batch_size = cache_lengths.shape[0]
 
-        if self.att_context_size[0] >= 0:
-            left_chunks_num = self.att_context_size[0] // chunk_size
-        else:
-            left_chunks_num = 10000
-
-        batch_size = int(cache_lengths.size(0))
-        if lengths is None:
-            lengths = torch.full(
-                (batch_size,),
-                current_len,
-                dtype=torch.int64,
-                device=device,
-            )
-
-        max_cache_len = int(cache_lengths.max().item())
         key_len_max = max_cache_len + current_len
         pad_mask = torch.zeros(batch_size, current_len, device=device, dtype=torch.bool)
         att_mask = torch.ones(
@@ -226,6 +202,7 @@ class ConformerEncoder(nn.Module):
 
             chunk_idx_k = torch.div(key_pos, chunk_size, rounding_mode="trunc")
             chunk_idx_q = torch.div(query_pos, chunk_size, rounding_mode="trunc")
+
             diff_chunks = chunk_idx_q.unsqueeze(1) - chunk_idx_k.unsqueeze(0)
             allowed = torch.logical_and(
                 torch.le(diff_chunks, left_chunks_num), torch.ge(diff_chunks, 0)
@@ -264,24 +241,10 @@ class ConformerEncoder(nn.Module):
         length: Tensor | None = None,
         bypass_pre_encode: bool = False,
     ):
-        if not bypass_pre_encode:
-            if length is None:
-                length = x.new_full(
-                    (x.size(0),), x.size(-1), dtype=torch.int64, device=x.device
-                )
-            x = x.transpose(1, 2)
-            x, length = self.pre_encode(x, length)
-        else:
-            if length is None:
-                length = x.new_full(
-                    (x.size(0),), x.size(1), dtype=torch.int64, device=x.device
-                )
 
         cache_lengths = state.cache_lengths
-        cache_len_max = state.attn_cache_len()
-        state.cache.current_max_len = cache_len_max
 
-        x, pos_emb = self.pos_enc(x, cache_len=cache_len_max)
+        x, pos_emb = self.pos_enc(x, cache_len=self.att_context_size[0])
         pad_mask, att_mask = self._create_streaming_masks(
             current_len=x.size(1),
             cache_lengths=cache_lengths,

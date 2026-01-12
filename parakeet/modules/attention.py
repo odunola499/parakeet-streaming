@@ -85,7 +85,7 @@ class ConformerAttention(nn.Module):
     def forward(
         self, x: Tensor, pos_emb: Tensor, attn_mask: Tensor, cache: ModelCache = None
     ):
-        B = x.shape[0]
+        B, T = x.shape[:2]
         pos_emb_B = pos_emb.shape[0]
         attn_mask = attn_mask.bool()
         if attn_mask.ndim == 3:
@@ -93,8 +93,8 @@ class ConformerAttention(nn.Module):
 
         qkv = self.qkv(x)
         query, key, value = qkv.chunk(3, dim=-1)
-        if cache:
-            key, value = cache.update_attn_cache(self.layer_idx, (key, value))
+
+        key, value = cache.update_attn_cache(self.layer_idx, (key, value))
         query = query.view(B, -1, self.num_heads, self.d_k)
         key = key.view(B, -1, self.num_heads, self.d_k).transpose(1, 2)
         value = value.view(B, -1, self.num_heads, self.d_k).transpose(1, 2)
@@ -112,6 +112,8 @@ class ConformerAttention(nn.Module):
         matrix_bd = matrix_bd[:, :, :, : key.size(-2)] * (1 / self.s_d_k)
 
         matrix_bd = matrix_bd.masked_fill(attn_mask, -1e5)
+
+        # print(f"matrix_bd: {matrix_bd.shape},q_with_bias_u {q_with_bias_u.shape}, key {key.shape}, value {value.shape}")
         output = sdpa_attention_forward(
             query=q_with_bias_u, key=key, value=value, attention_mask=matrix_bd
         )

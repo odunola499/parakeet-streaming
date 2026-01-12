@@ -27,17 +27,34 @@ class ASRSocketServer:
         config: Config,
         host: str = "0.0.0.0",
         port: int = 8765,
+        status_port: int | None = None,
         device: str = "cpu",
     ):
         self.config = config
         self.host = host
         self.port = port
+        self.status_port = status_port
         self.device = device
         self.engine = ASREngine(config, device=device)
+        self._conn_lock = trio.Lock()
+        self._active_streams: set[int] = set()
 
     async def serve(self) -> None:
         logging.info("Starting server on %s:%s", self.host, self.port)
-        await trio.serve_tcp(self._handle_client, self.port, host=self.host)
+        async with trio.open_nursery() as nursery:
+            nursery.start_soon(
+                trio.serve_tcp, self._handle_client, self.port, host=self.host
+            )
+            if self.status_port is not None:
+                logging.info(
+                    "Starting status endpoint on %s:%s", self.host, self.status_port
+                )
+                nursery.start_soon(
+                    trio.serve_tcp,
+                    self._handle_status,
+                    self.status_port,
+                    host=self.host,
+                )
 
     def close(self) -> None:
         self.engine.close()
@@ -56,6 +73,7 @@ class ASRSocketServer:
             return
 
         state = ConnectionState(stream_id=stream_id)
+        await self._register_stream(state.stream_id)
         send_lock = trio.Lock()
         await _send_json(
             stream,
@@ -77,6 +95,7 @@ class ASRSocketServer:
                 )
         finally:
             await self._finalize_stream(state)
+            await self._unregister_stream(state.stream_id)
             await stream.aclose()
 
     async def _reader_loop(
@@ -192,6 +211,25 @@ class ASRSocketServer:
                 last_seq,
                 abandon_on_cancel=True,
             )
+
+    async def _handle_status(self, stream: trio.SocketStream) -> None:
+        payload = await self._status_payload()
+        message = json.dumps(payload, separators=(",", ":")) + "\n"
+        await stream.send_all(message.encode("utf-8"))
+        await stream.aclose()
+
+    async def _status_payload(self) -> dict[str, Any]:
+        async with self._conn_lock:
+            active = len(self._active_streams)
+        return {"type": "status", "connected_streams": active}
+
+    async def _register_stream(self, stream_id: int) -> None:
+        async with self._conn_lock:
+            self._active_streams.add(stream_id)
+
+    async def _unregister_stream(self, stream_id: int) -> None:
+        async with self._conn_lock:
+            self._active_streams.discard(stream_id)
 
 
 def _drain_messages(buffer: bytearray) -> Iterable[dict[str, Any]]:

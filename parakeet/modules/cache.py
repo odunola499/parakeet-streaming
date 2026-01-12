@@ -1,43 +1,37 @@
 from dataclasses import dataclass
 
-import torch
 from torch import Tensor
 
 
 class AttnCacheLayer:
-    def __init__(self, layer_idx: int, L_attn: int):
+    def __init__(self, layer_idx: int, left_attn: int):
         super().__init__()
         self.layer_idx = layer_idx
-        self.L_attn = L_attn
+        self.left_attn = left_attn
 
         self.k_cache = None
         self.v_cache = None
 
-    def update(self, state: tuple, max_cache_len: int | None = None):
+    def update(self, state: tuple):
         k, v = state
+        B, T, D = k.shape
+
         if self.k_cache is None:
-            self.k_cache = k.new_zeros((k.size(0), self.L_attn, k.size(-1)))
-            self.v_cache = v.new_zeros((v.size(0), self.L_attn, v.size(-1)))
+            self.k_cache = k.new_zeros((B, self.left_attn + T, D))
+            self.v_cache = v.new_zeros((B, self.left_attn + T, D))
 
-        max_cache_len = self.L_attn if max_cache_len is None else int(max_cache_len)
-        if max_cache_len > 0:
-            cache_k = self.k_cache[:, -max_cache_len:, :]
-            cache_v = self.v_cache[:, -max_cache_len:, :]
-        else:
-            cache_k = self.k_cache[:, :0, :]
-            cache_v = self.v_cache[:, :0, :]
+        self.k_cache[:, : self.left_attn].copy_(
+            self.k_cache[:, -self.left_attn :].clone()
+        )
+        self.v_cache[:, : self.left_attn].copy_(
+            self.v_cache[:, -self.left_attn :].clone()
+        )
 
-        full_k = torch.concat([cache_k, k], dim=1)
-        full_v = torch.concat([cache_v, v], dim=1)
+        self.k_cache[:, self.left_attn :].copy_(k)
+        self.v_cache[:, self.left_attn :].copy_(v)
 
-        if self.L_attn > 0:
-            updated_k = torch.concat([self.k_cache, k], dim=1)
-            updated_v = torch.concat([self.v_cache, v], dim=1)
-            self.k_cache = updated_k[:, -self.L_attn :, :]
-            self.v_cache = updated_v[:, -self.L_attn :, :]
-        else:
-            self.k_cache = torch.concat([self.k_cache, k], dim=1)
-            self.v_cache = torch.concat([self.v_cache, v], dim=1)
+        full_k = self.k_cache
+        full_v = self.v_cache
 
         return full_k, full_v
 
@@ -56,12 +50,12 @@ class ConvCacheLayer:
 
 
 class ModelCache:
-    def __init__(self, num_layers: int = 17, L_attn: int = 70):
+    def __init__(self, num_layers: int = 17, left_attn: int = 70):
         super().__init__()
-        self.L_attn = L_attn
-        self.current_max_len = 0
+        self.left_attn = left_attn
+
         self.attn_caches = {
-            i: AttnCacheLayer(i, L_attn=L_attn) for i in range(num_layers)
+            i: AttnCacheLayer(i, left_attn=left_attn) for i in range(num_layers)
         }
         self.conv_caches = {i: ConvCacheLayer(i) for i in range(num_layers)}
 
@@ -72,17 +66,16 @@ class ModelCache:
         self.conv_caches[layer_idx].update(state)
 
     def update_attn_cache(self, layer_idx, layer_cache):
-        return self.attn_caches[layer_idx].update(
-            layer_cache, max_cache_len=self.current_max_len
-        )
+
+        return self.attn_caches[layer_idx].update(layer_cache)
 
     def reset(self):
         for layer in self.attn_caches.values():
             layer.k_cache = None
             layer.v_cache = None
+
         for layer in self.conv_caches.values():
             layer.cache = None
-        self.current_max_len = 0
 
 
 @dataclass
@@ -97,4 +90,9 @@ class StreamingState:
         return int(self.cache_lengths)
 
 
-__all__ = ["AttnCacheLayer", "ConvCacheLayer", "ModelCache", "StreamingState"]
+__all__ = [
+    "AttnCacheLayer",
+    "ConvCacheLayer",
+    "ModelCache",
+    "StreamingState",
+]

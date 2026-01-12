@@ -44,24 +44,27 @@ class ModelRunner:
         self.pre_encoder = self.encoder.pre_encode
         self.decoder = self.model.predictor
         self.joiner = self.model.joiner
-        self.sampler = self.model
 
         param = next(self.model.parameters())
         self._dtype = param.dtype
 
-        self._attn_cache_len = self.encoder.att_context_size[0]
+        self._attn_cache_len = self.encoder.att_context_size[0] + 2
         self._layer_hidden = [layer.hidden_size for layer in self.encoder.layers]
-        self._conv_cache_len = [
-            layer.conv.depthwise_conv._max_cache_len for layer in self.encoder.layers
-        ]
+        self._conv_cache_len = [self.config.model_config.conv_kernel_size - 1] * len(
+            self.encoder.layers
+        )
         self._subsampling_factor = self.model.config.subsampling_factor
         self._lookahead = self.encoder.att_context_size[1]
         self._chunk_frames_first = 1 + self._subsampling_factor * self._lookahead
         self._chunk_frames_next = (
             self._subsampling_factor + self._subsampling_factor * self._lookahead
         )
-        self._feature_extractor_cls = type(self.model._feature_extractor)
-        self._samples_per_frame = self._feature_extractor_cls().hop_length
+        self._feature_extractor = self.model._feature_extractor
+        self._samples_per_frame = self._feature_extractor.hop_length
+        self.blank_id = self.model.blank_id
+        self.start_ids = torch.full(
+            (1,), self.blank_id, dtype=torch.long, device=self.device
+        )
 
     def _init_state_pool(self, pool_size: int) -> None:
         self._state_pool: list = []
@@ -158,23 +161,18 @@ class ModelRunner:
         if encoder_state is None:
             return None
 
-        feature_extractor = self._feature_extractor_cls()
-
         pred_state = self.decoder.init_state(1)
         if isinstance(pred_state, tuple):
             pred_state = tuple(s.to(self.device) for s in pred_state)
         else:
             pred_state = pred_state.to(self.device)
 
-        blank_id = self.model.blank_id
-        start_ids = torch.full((1,), blank_id, dtype=torch.long, device=self.device)
-        pred_out, pred_state = self.decoder.step(start_ids, state=pred_state)
+        with torch.inference_mode():
+            pred_out, pred_state = self.decoder(self.start_ids, state=pred_state)
 
-        pre_encode_cache_size = self.encoder.pre_encode_cache_size
-        if isinstance(pre_encode_cache_size, (list, tuple)):
-            pre_encode_cache_size = pre_encode_cache_size[1]
+        pre_encode_cache_size = self.encoder.pre_encode_cache_size[1]
         drop_extra_pre_encoded = self.encoder.drop_extra_pre_encoded
-        enc_chunk_size = self.encoder.att_context_size[1] + 1
+        enc_chunk_size = self._lookahead + 1
 
         max_pending_samples = int(
             self.config.max_stream_seconds * self.config.sample_rate
@@ -185,7 +183,6 @@ class ModelRunner:
             encoder_state=encoder_state,
             pred_state=pred_state,
             pred_out=pred_out,
-            feature_extractor=feature_extractor,
             pre_encode_cache_size=pre_encode_cache_size,
             drop_extra_pre_encoded=drop_extra_pre_encoded,
             chunk_samples_first=self._chunk_frames_first * self._samples_per_frame,
@@ -276,14 +273,14 @@ class ModelRunner:
     def _run_pre_encode(self, seq: Sequence) -> None:
         while True:
             with seq.lock:
-                if not seq.raw_queue or seq.feature_extractor is None:
+                if not seq.raw_queue:
                     return
                 samples, is_final = seq.raw_queue.popleft()
                 pre_encode_cache = seq.pre_encode_cache
                 drop_extra_pre_encoded = seq.drop_extra_pre_encoded
                 pre_encode_cache_size = seq.pre_encode_cache_size
 
-            feats = seq.feature_extractor.push(samples, final=is_final)
+            feats = self._feature_extractor.push(samples, seq, final=is_final)
             if feats is None:
                 continue
             feats = feats.to(self.device)
@@ -306,8 +303,6 @@ class ModelRunner:
                 pre_encoded = pre_encoded[:, drop_extra_pre_encoded:, :]
 
             with seq.lock:
-                if seq.feature_extractor is None:
-                    return
                 if pre_encode_cache_size > 0:
                     if feats_in.size(-1) >= pre_encode_cache_size:
                         seq.pre_encode_cache = feats_in[
@@ -425,7 +420,6 @@ class ModelRunner:
         lengths = [int(chunk.size(2)) for chunk in chunks]
         pred_outs = [seq.pred_out for seq in seqs]
         pred_states = [seq.pred_state for seq in seqs]
-        blank_id = self.model.blank_id
 
         with torch.inference_mode():
             max_len = max(lengths)
@@ -440,10 +434,7 @@ class ModelRunner:
                 state_batch = self._stack_states([pred_states[i] for i in active])
 
                 pred_out_batch, state_batch, new_tokens = self._decode_frame_batch(
-                    frame_batch,
-                    pred_out_batch,
-                    state_batch,
-                    blank_id=blank_id,
+                    frame_batch, pred_out_batch, state_batch
                 )
 
                 for idx, tokens in zip(active, new_tokens):
@@ -466,21 +457,20 @@ class ModelRunner:
         frame_batch: torch.Tensor,
         pred_out_batch: torch.Tensor,
         state_batch,
-        blank_id: int,
     ):
         token_lists = [[] for _ in range(frame_batch.size(0))]
-        for _ in range(self.sampler.max_symbols_per_timestep):
+        for _ in range(10):
             logits = self.joiner(frame_batch, pred_out_batch)
             ids = logits.argmax(-1)
-            blank_mask = ids == blank_id
+            blank_mask = ids == self.blank_id
             if bool(blank_mask.all()):
                 break
 
             for idx, token_id in enumerate(ids.tolist()):
-                if token_id != blank_id:
+                if token_id != self.blank_id:
                     token_lists[idx].append(token_id)
 
-            new_pred_out, new_state = self.decoder.step(ids, state=state_batch)
+            new_pred_out, new_state = self.decoder(ids, state=state_batch)
             pred_out_batch = torch.where(
                 blank_mask.unsqueeze(-1), pred_out_batch, new_pred_out
             )

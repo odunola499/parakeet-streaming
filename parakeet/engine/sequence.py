@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections import deque
 import threading
-from dataclasses import dataclass
 from enum import Enum, auto
 from itertools import count
 
@@ -13,15 +12,12 @@ import torch
 # Add a SequenceStatus.PAUSE to show when audio isnt coming in,
 # temporarily remove from worker batch batch to free memory
 # Only a stream disconnect would assert a Finished, and this would free up space.
+
+
 class SequenceStatus(Enum):
     WAITING = auto()
     RUNNING = auto()
     FINISHED = auto()
-
-
-@dataclass
-class SequenceConfig:
-    max_symbols_per_timestep: int = 10
 
 
 class Sequence:
@@ -34,22 +30,18 @@ class Sequence:
         encoder_state,
         pred_state,
         pred_out,
-        feature_extractor,
         pre_encode_cache_size: int,
         drop_extra_pre_encoded: int,
         chunk_samples_first: int,
         chunk_samples_next: int,
         max_pending_samples: int,
         device: torch.device,
-        config: SequenceConfig | None = None,
     ):
         self.request_id = next(Sequence.counter)
         self.status = SequenceStatus.WAITING
         self.device = device
-        self.config = config or SequenceConfig()
         self.lock = threading.Lock()
 
-        self.feature_extractor = feature_extractor
         self.encoder_state = encoder_state
         self.pred_state = pred_state
         self.pred_out = pred_out
@@ -67,6 +59,9 @@ class Sequence:
         self._pending_start = 0
         self._pending_len = 0
         self._first_chunk = True
+        self._fe_samples = np.empty((0,), dtype=np.float32)
+        self._fe_emitted_frames = 0
+        self._fe_sample_offset = 0
 
         self.token_ids: list[int] = []
         self.final = False
@@ -155,6 +150,15 @@ class Sequence:
         )
         chunk = self.enc_buffer[:, :take, :]
         self.enc_buffer = self.enc_buffer[:, take:, :]
+        if self.final and take < self.enc_chunk_size:
+            pad = self.enc_chunk_size - take
+            pad_chunk = torch.zeros(
+                (chunk.size(0), pad, chunk.size(2)),
+                device=chunk.device,
+                dtype=chunk.dtype,
+            )
+            chunk = torch.cat([chunk, pad_chunk], dim=1)
+            take = self.enc_chunk_size
         length = torch.full((1,), take, dtype=torch.int64, device=self.device)
         return chunk, length
 
@@ -187,6 +191,8 @@ class Sequence:
         self.pre_encode_cache = None
         self.pred_state = None
         self.pred_out = None
-        self.feature_extractor = None
         self.enc_buffer = None
         self._pending_buffer = None
+        self._fe_samples = np.empty((0,), dtype=np.float32)
+        self._fe_emitted_frames = 0
+        self._fe_sample_offset = 0

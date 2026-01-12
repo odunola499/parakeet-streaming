@@ -35,16 +35,16 @@ def pull_from_engine(stream_id, engine, show_text: bool = True):
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--num-streams", type=int, default=1)
+    parser.add_argument("--num-streams", type=int, default=3)
     parser.add_argument(
         "--audio",
         nargs="*",
         default=[
             "/Users/odunolajenrola/Documents/GitHub/parakeet-streaming/test.mp3",
-            "/Users/odunolajenrola/Documents/GitHub/parakeet-streaming/test.mp3",
+            "/Users/odunolajenrola/Documents/GitHub/parakeet-streaming/test_2.mp3",
         ],
     )
-    parser.add_argument("--duration", type=float, default=2)
+    parser.add_argument("--duration", type=float, default=10)
     parser.add_argument("--sample-rate", type=int, default=16000)
     parser.add_argument("--chunk-seconds", type=float, default=0.25)
     parser.add_argument("--model-size", choices=("small", "large"), default="small")

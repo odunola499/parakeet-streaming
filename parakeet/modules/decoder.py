@@ -41,24 +41,7 @@ class Predictor(nn.Module):
             ),
         )
 
-    def forward(self, targets: Tensor, target_length: Tensor, states=None):
-        y = self.prediction["embed"](targets)
-
-        bsz, seq_len, hidden = y.shape
-        start = torch.zeros(
-            (bsz, 1, hidden), dtype=targets.dtype, device=targets.device
-        )
-        y = torch.concat([start, y], dim=1).contiguous()
-
-        if states is None:
-            states = self.init_state(bsz)
-
-        y = y.transpose(0, 1)
-        g, hidden = self.prediction["dec_rnn"](y, states)
-        g = g.transpose(0, 1).transpose(1, 2)
-        return g, target_length, hidden
-
-    def step(self, input_ids: Tensor, state: tuple[Tensor, Tensor] | Tensor):
+    def forward(self, input_ids: Tensor, state: tuple[Tensor, Tensor] | Tensor):
         input_ids = input_ids.reshape(-1, 1)
         y = self.prediction["embed"](input_ids)
         y = y.transpose(0, 1)
