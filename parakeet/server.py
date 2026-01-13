@@ -50,7 +50,7 @@ class ASRSocketServer:
         self._active_streams: set[int] = set()
 
     async def serve(self) -> None:
-        logging.info("Started TCP server on %s:%s", self.host, self.port)
+        logging.info("Started TCP server on %s:%s", self.host, self.tcp_port)
         async with trio.open_nursery() as nursery:
 
             # TCP
