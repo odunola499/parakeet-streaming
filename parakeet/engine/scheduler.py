@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from dataclasses import dataclass
 from collections import deque
 from typing import Deque, Iterable

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from collections import deque
 import threading
 from enum import Enum, auto
@@ -7,11 +5,6 @@ from itertools import count
 
 import numpy as np
 import torch
-
-
-# Add a SequenceStatus.PAUSE to show when audio isnt coming in,
-# temporarily remove from worker batch batch to free memory
-# Only a stream disconnect would assert a Finished, and this would free up space.
 
 
 class SequenceStatus(Enum):
