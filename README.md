@@ -15,15 +15,14 @@ Both models are based on the cache-aware FastConformer RNNT Architecture develop
 streaming.
 The small model emits an end-of-utterance (EOU) token  and is designed for low-latency English transcription
 without punctuation or
-capitalization. The large model is a cache-aware FastConformer RNNT supports punctuation and capitalization
-with configurable
-chunk sizes for streaming workloads.
+capitalization. The large model supports punctuation and capitalization.
 
 Model weights are governed by NVIDIA's Open Model License (NeMo). The model implementation in this repo
 rewrites the q, k, v layers  in FastConformer to be a single linear layer ```qkv``` and
 chunks this to get the query, key and values.
-Because of this, weights of both models are saved in the ```safetensors``` format in a separate huggingface repo.
-This allows for faster weight loading but the official
+Because of this, weights of both models are saved in the ```safetensors``` format in a separate huggingface repo for
+easier loading.
+This also allows for faster weight loading but the official
 license terms still apply.
 
 Expected latency is about 160 ms. On an NVIDIA A100, the small model supports around
