@@ -88,6 +88,7 @@ class ASRSocketServer:
         self.engine.close()
 
     async def _handle_client(self, stream: trio.SocketStream) -> None:
+        peer = _format_peer(stream)
         try:
             stream_id = self.engine.create_stream()
         except RuntimeError as exc:
@@ -102,6 +103,7 @@ class ASRSocketServer:
 
         state = ConnectionState(stream_id=stream_id)
         await self._register_stream(state.stream_id)
+        logging.info("TCP client connected stream_id=%s peer=%s", stream_id, peer)
         send_lock = trio.Lock()
         await _send_json(
             stream,
@@ -124,10 +126,16 @@ class ASRSocketServer:
         finally:
             await self._finalize_stream(state)
             await self._unregister_stream(state.stream_id)
+            logging.info(
+                "TCP client disconnected stream_id=%s peer=%s",
+                state.stream_id,
+                peer,
+            )
             await stream.aclose()
 
     async def _handle_ws_client(self, request: Any) -> None:
         ws = await request.accept()
+        peer = _format_ws_peer(request)
         try:
             stream_id = self.engine.create_stream()
         except RuntimeError as exc:
@@ -142,6 +150,7 @@ class ASRSocketServer:
 
         state = ConnectionState(stream_id=stream_id)
         await self._register_stream(state.stream_id)
+        logging.info("WS client connected stream_id=%s peer=%s", stream_id, peer)
         send_lock = trio.Lock()
         await _send_ws_json(
             ws,
@@ -164,6 +173,11 @@ class ASRSocketServer:
         finally:
             await self._finalize_stream(state)
             await self._unregister_stream(state.stream_id)
+            logging.info(
+                "WS client disconnected stream_id=%s peer=%s",
+                state.stream_id,
+                peer,
+            )
             await _close_ws(ws)
 
     async def _reader_loop(
@@ -362,6 +376,10 @@ class ASRSocketServer:
                 return
             self.engine.collect_stream_results(state.stream_id)
             if deadline is not None and trio.current_time() >= deadline:
+                logging.warning(
+                    "Forcing stream cleanup after disconnect stream_id=%s",
+                    state.stream_id,
+                )
                 self.engine.cleanup_stream(state.stream_id)
                 self.engine.drop_stream_results(state.stream_id)
                 return
@@ -459,6 +477,22 @@ async def _send_json(
     data = message.encode("utf-8")
     async with lock:
         await stream.send_all(data)
+
+
+def _format_peer(stream: trio.SocketStream) -> str:
+    try:
+        peer = stream.socket.getpeername()
+    except Exception:
+        return "unknown"
+    return str(peer)
+
+
+def _format_ws_peer(request: Any) -> str:
+    for attr in ("remote", "client", "peer"):
+        value = getattr(request, attr, None)
+        if value:
+            return str(value)
+    return "unknown"
 
 
 async def _send_ws_json(ws: Any, lock: trio.Lock, payload: dict[str, Any]) -> None:
