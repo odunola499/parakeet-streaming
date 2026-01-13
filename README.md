@@ -1,7 +1,7 @@
 # parakeet-streaming
 
 Low-latency, real-time streaming Automatic Speech Recognition (ASR) inference service
-built around NVIDIA's streaming speech models. Status: beta. This project is actively
+built around NVIDIA's streaming speech models. This project is still actively
 worked on, so bugs and breaking changes are possible.
 
 ## Models
