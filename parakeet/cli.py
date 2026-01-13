@@ -28,7 +28,6 @@ def _build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--max-num-streams", type=int, default=100)
     serve.add_argument("--sample-rate", type=int, default=16000)
     serve.add_argument("--max-stream-seconds", type=int, default=300)
-    serve.add_argument("--max-seq-len", type=int, default=5000)
     return parser
 
 
@@ -52,7 +51,6 @@ def _print_config(
     print(f"  max_num_streams: {config.max_num_streams}")
     print(f"  sample_rate: {config.sample_rate}")
     print(f"  max_stream_seconds: {config.max_stream_seconds}")
-    print(f"  max_seq_len: {config.max_seq_len}")
 
 
 async def _serve_async(args: argparse.Namespace) -> None:
@@ -61,7 +59,6 @@ async def _serve_async(args: argparse.Namespace) -> None:
         max_num_streams=args.max_num_streams,
         sample_rate=args.sample_rate,
         max_stream_seconds=args.max_stream_seconds,
-        max_seq_len=args.max_seq_len,
     )
     _print_config(
         config, args.host, args.port, args.ws_port, args.status_port, args.device

@@ -125,7 +125,6 @@ class Parakeet(nn.Module, GenerationMixin):
         model = cls(config)
         state_dict = remap_weights(state_dict)
         model.load_state_dict(state_dict)
-        print("loaded model")
         model._feature_extractor = FeatureExtractor()
         model._tokenizer = Tokenizer(tokenizer_path)
 

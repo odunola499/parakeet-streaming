@@ -58,8 +58,6 @@ These are the most commonly used flags when starting the server:
 
 `--max-stream-seconds` caps how much audio a stream can buffer.
 
-`--max-seq-len` caps the token sequence length.
-
 You can view the full list of flags with:
 
 ```bash

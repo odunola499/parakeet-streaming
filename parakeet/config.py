@@ -39,7 +39,6 @@ class Config:
     max_num_streams: int = 100
     sample_rate: int = 16000
     max_stream_seconds: int = 300
-    max_seq_len: int = 5000
 
     def __post_init__(self):
         if self.size == "small":

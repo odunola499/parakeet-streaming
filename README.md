@@ -47,7 +47,7 @@ parakeet-server serve --host 0.0.0.0 --port 8765 --ws-port 8766 --device cuda
 ```
 
 Common flags include `--model-size`, `--sample-rate`, `--max-num-streams`,
-`--max-stream-seconds`, `--max-seq-len`, `--ws-port`, and `--status-port`.
+`--max-stream-seconds`, `--ws-port`, and `--status-port`.
 
 ## Client protocol
 
