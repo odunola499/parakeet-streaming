@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Parakeet Streaming Test</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      background: #0f172a;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      color: #e2e8f0;
+    }
+
+    .container {
+      background: #1e293b;
+      border-radius: 16px;
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+      max-width: 900px;
+      width: 100%;
+      padding: 40px;
+      border: 1px solid #334155;
+    }
+
+    h1 {
+      color: #f1f5f9;
+      margin-bottom: 8px;
+      font-size: 2.5em;
+      font-weight: 700;
+    }
+
+    .subtitle {
+      color: #94a3b8;
+      margin-bottom: 32px;
+      font-size: 1em;
+    }
+
+    .url-section {
+      margin-bottom: 24px;
+    }
+
+    .url-input-wrapper {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    .url-input {
+      flex: 1;
+      padding: 14px 18px;
+      background: #0f172a;
+      border: 2px solid #334155;
+      border-radius: 10px;
+      font-size: 1em;
+      color: #f1f5f9;
+      font-family: 'Monaco', 'Menlo', monospace;
+      transition: all 0.2s;
+    }
+
+    .url-input:focus {
+      outline: none;
+      border-color: #3b82f6;
+      box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+    }
+
+    .url-input::placeholder {
+      color: #64748b;
+    }
+
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 18px;
+      border-radius: 10px;
+      font-size: 0.9em;
+      font-weight: 600;
+      margin-bottom: 24px;
+    }
+
+    .status::before {
+      content: '';
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+
+    .status.disconnected {
+      background: rgba(239, 68, 68, 0.1);
+      color: #f87171;
+    }
+
+    .status.connecting {
+      background: rgba(251, 191, 36, 0.1);
+      color: #fbbf24;
+    }
+
+    .status.connected {
+      background: rgba(34, 197, 94, 0.1);
+      color: #4ade80;
+    }
+
+    .status.recording {
+      background: rgba(239, 68, 68, 0.2);
+      color: #f87171;
+      animation: pulse 2s ease-in-out infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.7; }
+    }
+
+    .controls {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+
+    button {
+      padding: 14px 24px;
+      border: none;
+      border-radius: 10px;
+      font-size: 1em;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+      color: white;
+    }
+
+    button:hover:not(:disabled) {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 16px rgba(0, 0, 0, 0.3);
+    }
+
+    button:active:not(:disabled) {
+      transform: translateY(0);
+    }
+
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .btn-connect {
+      background: #3b82f6;
+    }
+
+    .btn-connect:hover:not(:disabled) {
+      background: #2563eb;
+    }
+
+    .btn-record {
+      background: #ef4444;
+    }
+
+    .btn-record:hover:not(:disabled) {
+      background: #dc2626;
+    }
+
+    .btn-record.recording {
+      background: #dc2626;
+    }
+
+    .btn-clear {
+      background: #64748b;
+    }
+
+    .btn-clear:hover:not(:disabled) {
+      background: #475569;
+    }
+
+    .transcript {
+      background: #0f172a;
+      border: 2px solid #334155;
+      border-radius: 12px;
+      padding: 24px;
+      min-height: 300px;
+      max-height: 500px;
+      overflow-y: auto;
+      font-size: 1.15em;
+      line-height: 1.8;
+      color: #cbd5e1;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    }
+
+    .transcript.empty {
+      color: #64748b;
+      font-style: italic;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .transcript .partial {
+      color: #94a3b8;
+      font-style: italic;
+    }
+
+    .transcript .final {
+      color: #f1f5f9;
+      font-weight: 500;
+    }
+
+    .error {
+      background: rgba(239, 68, 68, 0.1);
+      color: #f87171;
+      padding: 16px;
+      border-radius: 10px;
+      margin-bottom: 20px;
+      border: 1px solid rgba(239, 68, 68, 0.2);
+      display: none;
+      font-size: 0.95em;
+    }
+
+    .error.show {
+      display: block;
+    }
+
+    .info {
+      margin-top: 24px;
+      padding-top: 24px;
+      border-top: 1px solid #334155;
+      font-size: 0.85em;
+      color: #94a3b8;
+    }
+
+    .info code {
+      background: #0f172a;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-family: 'Monaco', 'Menlo', monospace;
+      color: #cbd5e1;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🎤 Parakeet Streaming</h1>
+    <p class="subtitle">Real-time speech recognition test interface</p>
+
+    <div class="error" id="error"></div>
+
+    <div class="url-section">
+      <div class="url-input-wrapper">
+        <input 
+          type="text" 
+          class="url-input" 
+          id="serverUrl" 
+          value="ws://149.36.1.129:8766" 
+          placeholder="ws://host:port"
+          autocomplete="off"
+        >
+      </div>
+      <div>
+        <span class="status disconnected" id="status">Disconnected</span>
+      </div>
+    </div>
+
+    <div class="controls">
+      <button class="btn-connect" id="btnConnect">Connect</button>
+      <button class="btn-record" id="btnRecord" disabled>Start Recording</button>
+      <button class="btn-clear" id="btnClear">Clear</button>
+    </div>
+
+    <div class="transcript empty" id="transcript">No transcription yet. Connect and start recording to begin.</div>
+
+    <div class="info">
+      <strong>Tip:</strong> Paste the full WebSocket URL (e.g., <code>ws://149.36.1.129:8766</code>) in the input above. 
+      Partial results appear in gray, final results in white.
+    </div>
+  </div>
+
+  <script>
+    let ws = null;
+    let audioContext = null;
+    let mediaStream = null;
+    let processor = null;
+    let source = null;
+    let isRecording = false;
+    let isConnected = false;
+
+    const statusEl = document.getElementById('status');
+    const transcriptEl = document.getElementById('transcript');
+    const errorEl = document.getElementById('error');
+    const btnConnect = document.getElementById('btnConnect');
+    const btnRecord = document.getElementById('btnRecord');
+    const btnClear = document.getElementById('btnClear');
+    const serverUrlInput = document.getElementById('serverUrl');
+
+    function showError(message) {
+      errorEl.textContent = message;
+      errorEl.classList.add('show');
+      setTimeout(() => errorEl.classList.remove('show'), 5000);
+    }
+
+    function updateStatus(status, text) {
+      statusEl.className = `status ${status}`;
+      statusEl.textContent = text;
+    }
+
+    function normalizeUrl(url) {
+      url = url.trim();
+      if (!url.startsWith('ws://') && !url.startsWith('wss://')) {
+        if (url.includes('://')) {
+          url = url.replace(/^https?:/, 'ws:');
+        } else {
+          url = `ws://${url}`;
+        }
+      }
+      return url;
+    }
+
+    function connect() {
+      const url = normalizeUrl(serverUrlInput.value);
+
+      if (!url) {
+        showError('Please enter a WebSocket URL');
+        return;
+      }
+
+      updateStatus('connecting', 'Connecting...');
+      btnConnect.disabled = true;
+      serverUrlInput.disabled = true;
+
+      ws = new WebSocket(url);
+
+      ws.onopen = () => {
+        isConnected = true;
+        updateStatus('connected', 'Connected');
+        btnConnect.textContent = 'Disconnect';
+        btnConnect.disabled = false;
+        btnRecord.disabled = false;
+        serverUrlInput.disabled = false;
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          
+          if (msg.type === 'hello') {
+            console.log('Server hello:', msg);
+          } else if (msg.type === 'result') {
+            if (msg.text) {
+              addTranscript(msg.text, msg.is_final);
+            }
+          } else if (msg.type === 'error') {
+            showError(`Server error: ${msg.message}`);
+          } else if (msg.type === 'pong') {
+            console.log('Pong received');
+          }
+        } catch (e) {
+          console.error('Failed to parse message:', e);
+        }
+      };
+
+      ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
+        showError('Connection error. Check the server URL and ensure the server is running.');
+        updateStatus('disconnected', 'Connection Error');
+        btnConnect.disabled = false;
+        btnRecord.disabled = true;
+        serverUrlInput.disabled = false;
+      };
+
+      ws.onclose = () => {
+        isConnected = false;
+        updateStatus('disconnected', 'Disconnected');
+        btnConnect.textContent = 'Connect';
+        btnConnect.disabled = false;
+        btnRecord.disabled = true;
+        serverUrlInput.disabled = false;
+        if (isRecording) {
+          stopRecording();
+        }
+      };
+    }
+
+    function disconnect() {
+      if (ws) {
+        ws.close();
+        ws = null;
+      }
+      if (isRecording) {
+        stopRecording();
+      }
+    }
+
+    async function startRecording() {
+      try {
+        mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        audioContext = new AudioContext({ sampleRate: 16000 });
+        source = audioContext.createMediaStreamSource(mediaStream);
+        processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+        processor.onaudioprocess = (event) => {
+          if (!isConnected || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+          const input = event.inputBuffer.getChannelData(0);
+          const pcm16 = new Int16Array(input.length);
+          
+          for (let i = 0; i < input.length; i++) {
+            const s = Math.max(-1, Math.min(1, input[i]));
+            pcm16[i] = Math.round(s * 32767);
+          }
+
+          const base64 = btoa(String.fromCharCode(...new Uint8Array(pcm16.buffer)));
+          ws.send(JSON.stringify({
+            type: 'audio',
+            data: base64,
+            encoding: 'pcm16',
+            final: false
+          }));
+        };
+
+        source.connect(processor);
+        processor.connect(audioContext.destination);
+
+        isRecording = true;
+        updateStatus('recording', 'Recording...');
+        btnRecord.textContent = 'Stop Recording';
+        btnRecord.classList.add('recording');
+      } catch (error) {
+        console.error('Recording error:', error);
+        showError(`Microphone access denied: ${error.message}`);
+      }
+    }
+
+    function stopRecording() {
+      if (processor) {
+        processor.disconnect();
+        processor = null;
+      }
+      if (source) {
+        source.disconnect();
+        source = null;
+      }
+      if (audioContext) {
+        audioContext.close();
+        audioContext = null;
+      }
+      if (mediaStream) {
+        mediaStream.getTracks().forEach(track => track.stop());
+        mediaStream = null;
+      }
+
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type: 'audio',
+          data: '',
+          encoding: 'pcm16',
+          final: true
+        }));
+      }
+
+      isRecording = false;
+      if (isConnected) {
+        updateStatus('connected', 'Connected');
+      } else {
+        updateStatus('disconnected', 'Disconnected');
+      }
+      btnRecord.textContent = 'Start Recording';
+      btnRecord.classList.remove('recording');
+    }
+
+    function addTranscript(text, isFinal) {
+      if (transcriptEl.classList.contains('empty')) {
+        transcriptEl.textContent = '';
+        transcriptEl.classList.remove('empty');
+      }
+
+      if (isFinal) {
+        const finalSpan = document.createElement('span');
+        finalSpan.className = 'final';
+        finalSpan.textContent = text + ' ';
+        transcriptEl.appendChild(finalSpan);
+        
+        // Remove any existing partial
+        const existingPartial = transcriptEl.querySelector('.partial');
+        if (existingPartial) {
+          existingPartial.remove();
+        }
+      } else {
+        // Remove any existing partial
+        const existingPartial = transcriptEl.querySelector('.partial');
+        if (existingPartial) {
+          existingPartial.remove();
+        }
+        
+        const partialSpan = document.createElement('span');
+        partialSpan.className = 'partial';
+        partialSpan.textContent = text;
+        transcriptEl.appendChild(partialSpan);
+      }
+
+      transcriptEl.scrollTop = transcriptEl.scrollHeight;
+    }
+
+    function clearTranscript() {
+      transcriptEl.textContent = '';
+      transcriptEl.classList.add('empty');
+      transcriptEl.textContent = 'No transcription yet. Connect and start recording to begin.';
+    }
+
+    btnConnect.addEventListener('click', () => {
+      if (isConnected) {
+        disconnect();
+      } else {
+        connect();
+      }
+    });
+
+    btnRecord.addEventListener('click', () => {
+      if (isRecording) {
+        stopRecording();
+      } else {
+        startRecording();
+      }
+    });
+
+    btnClear.addEventListener('click', clearTranscript);
+
+    // Allow Enter key to connect
+    serverUrlInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !isConnected) {
+        connect();
+      }
+    });
+
+    // Auto-format URL on paste
+    serverUrlInput.addEventListener('paste', (e) => {
+      setTimeout(() => {
+        const url = normalizeUrl(serverUrlInput.value);
+        serverUrlInput.value = url;
+      }, 10);
+    });
+  </script>
+</body>
+</html>
