@@ -57,6 +57,7 @@ class ModelRunner:
         self._feature_extractor = self.model._feature_extractor
         self._samples_per_frame = self._feature_extractor.hop_length
         self.blank_id = self.model.blank_id
+        self._max_symbols_per_frame = 5
         self.start_ids = torch.full(
             (1,), self.blank_id, dtype=torch.long, device=self.device
         )
@@ -162,9 +163,12 @@ class ModelRunner:
     def _decode_loop(self, interval: float) -> None:
         while not self._stop_event.is_set():
             results, state_changed = self._decode_step()
+            result_ids = set()
             for result in results:
                 self._results_queue.put(result)
-            if results or state_changed:
+                result_ids.add(result.seq_id)
+            finalized = self._finalize_sequences(result_ids)
+            if results or state_changed or finalized:
                 self._notify_update()
             self._stop_event.wait(interval)
 
@@ -318,56 +322,92 @@ class ModelRunner:
 
         return results, state_changed
 
+    def _finalize_sequences(self, result_ids: set[int]) -> bool:
+        finalized = False
+        for seq in self.scheduler.active_sequences():
+            if seq.status == SequenceStatus.FINISHED:
+                continue
+            with seq.lock:
+                if not seq.final:
+                    continue
+                if seq.raw_queue or seq.encoded_queue:
+                    continue
+                if seq.enc_buffer is None or seq.enc_buffer.numel() > 0:
+                    continue
+                if seq.in_flight > 0:
+                    continue
+            self._release_sequence(seq)
+            if seq.request_id not in result_ids:
+                self._results_queue.put(DecodeResult(seq.request_id, []))
+            finalized = True
+        return finalized
+
     def _decode_batch(
         self, seqs: list[Sequence], chunks: list[torch.Tensor]
     ) -> list[list[int]]:
-        token_lists = [[] for _ in seqs]
         lengths = [int(chunk.size(2)) for chunk in chunks]
-        pred_outs = [seq.pred_out for seq in seqs]
-        pred_states = [seq.pred_state for seq in seqs]
+        order = sorted(range(len(seqs)), key=lengths.__getitem__, reverse=True)
+        sorted_seqs = [seqs[i] for i in order]
+        sorted_chunks = [chunks[i] for i in order]
+        sorted_lengths = [lengths[i] for i in order]
+        sorted_pred_outs = [seq.pred_out for seq in sorted_seqs]
+        sorted_pred_states = [seq.pred_state for seq in sorted_seqs]
+        token_lists_sorted = [[] for _ in sorted_seqs]
 
         with torch.inference_mode():
-            max_len = max(lengths)
+            max_len = sorted_lengths[0]
+            batch_size = len(sorted_seqs)
             for t in range(max_len):
-                active = [i for i, length in enumerate(lengths) if t < length]
-                if not active:
+                if t == 0:
+                    frame_hidden = sorted_chunks[0].size(1)
+                    frame_batch = torch.empty(
+                        (batch_size, 1, frame_hidden),
+                        device=sorted_chunks[0].device,
+                        dtype=sorted_chunks[0].dtype,
+                    )
+                    pred_proto = sorted_pred_outs[0]
+                    pred_out_batch = torch.empty(
+                        (batch_size,) + pred_proto.shape[1:],
+                        device=pred_proto.device,
+                        dtype=pred_proto.dtype,
+                    )
+
+                while batch_size > 0 and t >= sorted_lengths[batch_size - 1]:
+                    batch_size -= 1
+                if batch_size == 0:
                     break
-                active_count = len(active)
-                frame_hidden = chunks[0].size(1)
-                frame_batch = torch.empty(
-                    (active_count, 1, frame_hidden),
-                    device=chunks[0].device,
-                    dtype=chunks[0].dtype,
-                )
-                pred_proto = pred_outs[active[0]]
-                pred_out_batch = torch.empty(
-                    (active_count,) + pred_proto.shape[1:],
-                    device=pred_proto.device,
-                    dtype=pred_proto.dtype,
-                )
-                for row, idx in enumerate(active):
-                    frame = chunks[idx][:, :, t].unsqueeze(1)
+
+                for row in range(batch_size):
+                    frame = sorted_chunks[row][:, :, t].unsqueeze(1)
                     frame_batch[row : row + 1].copy_(frame)
-                    pred_out_batch[row : row + 1].copy_(pred_outs[idx])
-                state_batch = self._stack_states([pred_states[i] for i in active])
+                    pred_out_batch[row : row + 1].copy_(sorted_pred_outs[row])
 
-                pred_out_batch, state_batch, new_tokens = self._decode_frame_batch(
-                    frame_batch, pred_out_batch, state_batch
+                state_batch = self._stack_states(sorted_pred_states[:batch_size])
+                pred_out_active, state_batch, new_tokens = self._decode_frame_batch(
+                    frame_batch[:batch_size],
+                    pred_out_batch[:batch_size],
+                    state_batch,
                 )
 
-                for idx, tokens in zip(active, new_tokens):
-                    token_lists[idx].extend(tokens)
+                for row, tokens in enumerate(new_tokens):
+                    if tokens:
+                        token_lists_sorted[row].extend(tokens)
 
-                split_pred_outs = torch.split(pred_out_batch, 1, dim=0)
+                split_pred_outs = torch.split(pred_out_active, 1, dim=0)
                 split_states = self._unstack_states(state_batch)
-                for out, st, idx in zip(split_pred_outs, split_states, active):
-                    pred_outs[idx] = out
-                    pred_states[idx] = st
+                for row in range(batch_size):
+                    sorted_pred_outs[row] = split_pred_outs[row]
+                    sorted_pred_states[row] = split_states[row]
 
-        for seq, pred_out, pred_state in zip(seqs, pred_outs, pred_states):
+        for seq, pred_out, pred_state in zip(
+            sorted_seqs, sorted_pred_outs, sorted_pred_states
+        ):
             seq.pred_out = pred_out
             seq.pred_state = pred_state
 
+        token_lists = [[] for _ in seqs]
+        for sorted_idx, original_idx in enumerate(order):
+            token_lists[original_idx] = token_lists_sorted[sorted_idx]
         return token_lists
 
     def _decode_frame_batch(
@@ -377,7 +417,7 @@ class ModelRunner:
         state_batch,
     ):
         token_lists = [[] for _ in range(frame_batch.size(0))]
-        for _ in range(10):
+        for _ in range(self._max_symbols_per_frame):
             logits = self.joiner(frame_batch, pred_out_batch)
             ids = logits.argmax(-1)
             blank_mask = ids == self.blank_id
