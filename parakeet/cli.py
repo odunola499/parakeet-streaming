@@ -15,11 +15,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
     serve = subparsers.add_parser("serve", help="Start the streaming socket server.")
     serve.add_argument("--host", default="0.0.0.0")
-    serve.add_argument("--port", type=int, default=8765)
+    serve.add_argument(
+        "--port", type=int, default=8765, help="Port to listen for TCP clients."
+    )
     serve.add_argument(
         "--ws-port",
         type=int,
-        default=None,
+        default=8000,
         help="Port to listen for WebSocket clients.",
     )
     serve.add_argument("--status-port", type=int, default=None)
@@ -69,7 +71,7 @@ async def _serve_async(args: argparse.Namespace) -> None:
     server = ASRSocketServer(
         config,
         host=args.host,
-        port=args.port,
+        tcp_port=args.port,
         ws_port=args.ws_port,
         status_port=args.status_port,
         device=args.device,
