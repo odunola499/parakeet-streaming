@@ -65,10 +65,6 @@ class Scheduler:
         with self._lock:
             return list(self.active)
 
-    def idle(self) -> bool:
-        with self._lock:
-            return not self.waiting and not self.active
-
     def init_state_pool(
         self,
         encoder,

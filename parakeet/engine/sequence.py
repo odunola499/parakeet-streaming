@@ -61,9 +61,6 @@ class Sequence:
         self.in_flight = 0
 
     def push_samples(self, samples: np.ndarray, final: bool = False):
-        self.enqueue_samples(samples, final=final)
-
-    def enqueue_samples(self, samples: np.ndarray, final: bool = False):
         if samples.size:
             if self._pending_len + samples.size > self._pending_capacity:
                 raise RuntimeError("Stream buffer overflow.")
@@ -81,7 +78,19 @@ class Sequence:
                 ]
             self._pending_len += samples.size
 
-        self._emit_chunks(final=final)
+        while True:
+            if self._first_chunk:
+                needed = self.chunk_samples_first
+            else:
+                needed = self.chunk_samples_next
+            if self._pending_len < needed:
+                break
+            chunk = self._pop_pending(needed)
+            self.raw_queue.append((chunk, False))
+            self._first_chunk = False
+        if final and self._pending_len > 0:
+            chunk = self._pop_pending(self._pending_len)
+            self.raw_queue.append((chunk, True))
         if final:
             self.final = True
 
@@ -103,26 +112,8 @@ class Sequence:
         self._pending_len -= num_samples
         return chunk
 
-    def _emit_chunks(self, final: bool = False) -> None:
-        while True:
-            if self._first_chunk:
-                needed = self.chunk_samples_first
-            else:
-                needed = self.chunk_samples_next
-            if self._pending_len < needed:
-                break
-            chunk = self._pop_pending(needed)
-            self.raw_queue.append((chunk, False))
-            self._first_chunk = False
-        if final and self._pending_len > 0:
-            chunk = self._pop_pending(self._pending_len)
-            self.raw_queue.append((chunk, True))
-
     def has_pending_audio(self) -> bool:
         return bool(self.raw_queue)
-
-    def flush(self):
-        self.enqueue_samples(np.empty((0,), dtype=np.float32), final=True)
 
     def has_chunk_ready(self) -> bool:
         if self.enc_buffer is None:
@@ -174,9 +165,6 @@ class Sequence:
     def append_tokens(self, token_ids: list[int]) -> None:
         if token_ids:
             self.token_ids.extend(token_ids)
-
-    def __len__(self) -> int:
-        return len(self.token_ids)
 
     def cleanup(self) -> None:
         self.raw_queue.clear()

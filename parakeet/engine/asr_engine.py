@@ -1,12 +1,12 @@
 from collections import deque
 import threading
-from typing import Dict, Iterable
+from typing import Dict
 
 import numpy as np
 import torch
 
 from parakeet.config import Config
-from parakeet.engine.model_runner import ModelRunner, DecodeResult
+from parakeet.engine.model_runner import ModelRunner
 from parakeet.engine.scheduler import Scheduler, StreamResult
 from parakeet.engine.sequence import Sequence
 
@@ -50,9 +50,6 @@ class ASREngine:
         with seq.lock:
             seq.push_samples(samples, final=final)
 
-    def drain(self) -> list[DecodeResult]:
-        return self.runner.drain_results()
-
     def get_update_seq(self) -> int:
         return self.runner.get_update_seq()
 
@@ -67,7 +64,7 @@ class ASREngine:
             if seq is None:
                 continue
             with seq.lock:
-                text = self.decode(seq.token_ids)
+                text = self.tokenizer.decode(list(seq.token_ids))
                 is_final = seq.is_finished
             stream_result = StreamResult(
                 stream_id=item.seq_id,
@@ -78,18 +75,6 @@ class ASREngine:
             self._stream_results.setdefault(item.seq_id, deque()).append(stream_result)
             if is_final:
                 self.cleanup_stream(item.seq_id)
-
-    def decode(self, token_ids: Iterable[int]) -> str:
-        return self.tokenizer.decode(list(token_ids))
-
-    def collect_results(self) -> list[StreamResult]:
-        with self._result_lock:
-            self._drain_to_stream_results_locked()
-            results: list[StreamResult] = []
-            for queue in self._stream_results.values():
-                while queue:
-                    results.append(queue.popleft())
-            return results
 
     def collect_stream_results(self, stream_id: int) -> list[StreamResult]:
         with self._result_lock:

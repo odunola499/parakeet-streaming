@@ -104,8 +104,7 @@ class ModelRunner:
         self.scheduler.admit_ready()
         self._pre_encode_step()
         self._encode_step()
-        results, _ = self._decode_step()
-        return results
+        return self._decode_step()
 
     def start_workers(self, interval: float = 0.001) -> None:
         if self._threads:
@@ -162,13 +161,13 @@ class ModelRunner:
 
     def _decode_loop(self, interval: float) -> None:
         while not self._stop_event.is_set():
-            results, state_changed = self._decode_step()
+            results = self._decode_step()
             result_ids = set()
             for result in results:
                 self._results_queue.put(result)
                 result_ids.add(result.seq_id)
             finalized = self._finalize_sequences(result_ids)
-            if results or state_changed or finalized:
+            if results or finalized:
                 self._notify_update()
             self._stop_event.wait(interval)
 
@@ -182,6 +181,8 @@ class ModelRunner:
     def _run_pre_encode(self, seq: Sequence) -> None:
         while True:
             with seq.lock:
+                if seq.enc_buffer is None:
+                    return
                 if not seq.raw_queue:
                     return
                 samples, is_final = seq.raw_queue.popleft()
@@ -222,6 +223,8 @@ class ModelRunner:
                 pre_encoded = pre_encoded[:, drop_extra_pre_encoded:, :]
 
             with seq.lock:
+                if seq.enc_buffer is None:
+                    return
                 if pre_encode_cache_size > 0:
                     if feats_in.size(-1) >= pre_encode_cache_size:
                         seq.pre_encode_cache = feats_in[
@@ -300,12 +303,11 @@ class ModelRunner:
             with seq.lock:
                 seq.in_flight = max(0, seq.in_flight - 1)
 
-    def _decode_step(self) -> tuple[list[DecodeResult], bool]:
+    def _decode_step(self) -> list[DecodeResult]:
         results: list[DecodeResult] = []
-        state_changed = False
         batch_seqs: list[Sequence] = []
         batch_chunks: list[torch.Tensor] = []
-        for seq in list(self.scheduler.active_sequences()):
+        for seq in self.scheduler.active_sequences():
             if seq.has_encoded():
                 chunk = seq.pop_encoded()
                 if chunk is not None:
@@ -320,7 +322,7 @@ class ModelRunner:
                         seq.append_tokens(tokens)
                     results.append(DecodeResult(seq.request_id, tokens))
 
-        return results, state_changed
+        return results
 
     def _finalize_sequences(self, result_ids: set[int]) -> bool:
         finalized = False

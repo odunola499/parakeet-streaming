@@ -233,12 +233,6 @@ class ASRSocketServer:
                     state.disconnected = True
                     cancel_scope.cancel()
                     return
-                try:
-                    message = message.decode("utf-8")
-                except UnicodeDecodeError:
-                    logging.exception("Unable to decode message, Unicode Error")
-                    continue
-
                 for payload in _drain_ws_messages(message):
                     msg_type = payload.get("type")
                     if msg_type == "audio":
@@ -419,13 +413,13 @@ def _drain_messages(buffer: bytearray) -> Iterable[dict[str, Any]]:
 
 def _drain_ws_messages(message: str | None) -> Iterable[dict[str, Any]]:
     if not message:
-        return []
+        return
     if isinstance(message, bytes):
         try:
             message = message.decode("utf-8")
         except UnicodeDecodeError:
-            return []
-    for line in str(message).splitlines():
+            return
+    for line in message.splitlines():
         if not line.strip():
             continue
         try:
