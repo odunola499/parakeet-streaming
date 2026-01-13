@@ -1,11 +1,10 @@
 # Audio files
 *.mp3
+*.wav
 __pycache__/
 *.py[codz]
 *$py.class
-
 *.so
-
 .Python
 build/
 develop-eggs/
@@ -24,15 +23,10 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
-
 *.manifest
 *.spec
-
-# Installer logs
 pip-log.txt
 pip-delete-this-directory.txt
-
-# Unit test / coverage reports
 htmlcov/
 .tox/
 .nox/
@@ -46,16 +40,9 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 cover/
-
 .ipynb_checkpoints
-
-
 .env
 .envrc
 .venv
-
-
-
 .idea/
-
 .ruff_cache/
