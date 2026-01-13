@@ -12,14 +12,7 @@ import trio
 from parakeet.config import Config
 from parakeet.engine.asr_engine import ASREngine
 from parakeet.engine.scheduler import StreamResult
-
-try:
-    from trio_websocket import ConnectionClosed, serve_websocket
-except Exception:  # pragma: no cover - optional dependency
-    serve_websocket = None
-
-    class ConnectionClosed(Exception):
-        pass
+from trio_websocket import ConnectionClosed, serve_websocket
 
 
 @dataclass
