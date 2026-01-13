@@ -16,6 +16,12 @@ def _build_parser() -> argparse.ArgumentParser:
     serve = subparsers.add_parser("serve", help="Start the streaming socket server.")
     serve.add_argument("--host", default="0.0.0.0")
     serve.add_argument("--port", type=int, default=8765)
+    serve.add_argument(
+        "--ws-port",
+        type=int,
+        default=None,
+        help="Port to listen for WebSocket clients.",
+    )
     serve.add_argument("--status-port", type=int, default=None)
     serve.add_argument("--device", default="cpu")
     serve.add_argument("--model-size", choices=("small", "large"), default="small")
@@ -30,12 +36,15 @@ def _print_config(
     config: Config,
     host: str,
     port: int,
+    ws_port: int | None,
     status_port: int | None,
     device: str,
 ) -> None:
     print("Starting Parakeet streaming socket server")
     print(f"  host: {host}")
     print(f"  port: {port}")
+    if ws_port is not None:
+        print(f"  ws_port: {ws_port}")
     if status_port is not None:
         print(f"  status_port: {status_port}")
     print(f"  device: {device}")
@@ -54,11 +63,14 @@ async def _serve_async(args: argparse.Namespace) -> None:
         max_stream_seconds=args.max_stream_seconds,
         max_seq_len=args.max_seq_len,
     )
-    _print_config(config, args.host, args.port, args.status_port, args.device)
+    _print_config(
+        config, args.host, args.port, args.ws_port, args.status_port, args.device
+    )
     server = ASRSocketServer(
         config,
         host=args.host,
         port=args.port,
+        ws_port=args.ws_port,
         status_port=args.status_port,
         device=args.device,
     )

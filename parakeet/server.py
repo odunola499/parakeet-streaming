@@ -1,9 +1,8 @@
-from __future__ import annotations
-
 import base64
+import functools
+import inspect
 import json
 import logging
-import functools
 from dataclasses import dataclass
 from typing import Any, Iterable
 
@@ -13,6 +12,14 @@ import trio
 from parakeet.config import Config
 from parakeet.engine.asr_engine import ASREngine
 from parakeet.engine.scheduler import StreamResult
+
+try:
+    from trio_websocket import ConnectionClosed, serve_websocket
+except Exception:  # pragma: no cover - optional dependency
+    serve_websocket = None
+
+    class ConnectionClosed(Exception):
+        pass
 
 
 @dataclass
@@ -27,13 +34,15 @@ class ASRSocketServer:
         self,
         config: Config,
         host: str = "0.0.0.0",
-        port: int = 8765,
-        status_port: int | None = None,
-        device: str = "cpu",
+        tcp_port: int | None = None,
+        ws_port: int = 9000,
+        status_port: int = 8000,
+        device: str = "cuda",
     ):
         self.config = config
         self.host = host
-        self.port = port
+        self.tcp_port = tcp_port
+        self.ws_port = ws_port
         self.status_port = status_port
         self.device = device
         self.engine = ASREngine(config, device=device)
@@ -41,23 +50,39 @@ class ASRSocketServer:
         self._active_streams: set[int] = set()
 
     async def serve(self) -> None:
-        logging.info("Started server on %s:%s", self.host, self.port)
+        logging.info("Started TCP server on %s:%s", self.host, self.port)
         async with trio.open_nursery() as nursery:
-            serve_main = functools.partial(
-                trio.serve_tcp, self._handle_client, self.port, host=self.host
+
+            # TCP
+            if self.tcp_port is not None:
+                logging.info("Started TCP server on %s:%s", self.host, self.tcp_port)
+                serve_tcp = functools.partial(
+                    trio.serve_tcp, self._handle_client, self.tcp_port, host=self.host
+                )
+                nursery.start_soon(serve_tcp)
+
+            # WS
+            logging.info("Started WebSocket server on %s:%s", self.host, self.ws_port)
+            serve_ws = functools.partial(
+                serve_websocket,
+                self._handle_ws_client,
+                self.host,
+                self.ws_port,
+                ssl_context=None,
             )
-            nursery.start_soon(serve_main)
-            if self.status_port is not None:
-                logging.info(
-                    "Starting status endpoint on %s:%s", self.host, self.status_port
-                )
-                serve_status = functools.partial(
-                    trio.serve_tcp,
-                    self._handle_status,
-                    self.status_port,
-                    host=self.host,
-                )
-                nursery.start_soon(serve_status)
+            nursery.start_soon(serve_ws)
+
+            # Metrics
+            logging.info(
+                "Starting status endpoint on %s:%s", self.host, self.status_port
+            )
+            serve_status = functools.partial(
+                trio.serve_tcp,
+                self._handle_status,
+                self.status_port,
+                host=self.host,
+            )
+            nursery.start_soon(serve_status)
 
     def close(self) -> None:
         self.engine.close()
@@ -100,6 +125,46 @@ class ASRSocketServer:
             await self._finalize_stream(state)
             await self._unregister_stream(state.stream_id)
             await stream.aclose()
+
+    async def _handle_ws_client(self, request: Any) -> None:
+        ws = await request.accept()
+        try:
+            stream_id = self.engine.create_stream()
+        except RuntimeError as exc:
+            send_lock = trio.Lock()
+            await _send_ws_json(
+                ws,
+                send_lock,
+                {"type": "error", "message": str(exc)},
+            )
+            await _close_ws(ws)
+            return
+
+        state = ConnectionState(stream_id=stream_id)
+        await self._register_stream(state.stream_id)
+        send_lock = trio.Lock()
+        await _send_ws_json(
+            ws,
+            send_lock,
+            {
+                "type": "hello",
+                "stream_id": state.stream_id,
+                "sample_rate": self.config.sample_rate,
+            },
+        )
+
+        try:
+            async with trio.open_nursery() as nursery:
+                nursery.start_soon(
+                    self._reader_loop_ws, ws, state, send_lock, nursery.cancel_scope
+                )
+                nursery.start_soon(
+                    self._writer_loop_ws, ws, state, send_lock, nursery.cancel_scope
+                )
+        finally:
+            await self._finalize_stream(state)
+            await self._unregister_stream(state.stream_id)
+            await _close_ws(ws)
 
     async def _reader_loop(
         self,
@@ -147,6 +212,56 @@ class ASRSocketServer:
             state.disconnected = True
             cancel_scope.cancel()
 
+    async def _reader_loop_ws(
+        self,
+        ws: Any,
+        state: ConnectionState,
+        send_lock: trio.Lock,
+        cancel_scope: trio.CancelScope,
+    ) -> None:
+        try:
+            while True:
+                message = await _ws_get_message(ws)
+                if message is None:
+                    state.disconnected = True
+                    cancel_scope.cancel()
+                    return
+                try:
+                    message = message.decode("utf-8")
+                except UnicodeDecodeError:
+                    logging.exception("Unable to decode message, Unicode Error")
+                    continue
+
+                for payload in _drain_ws_messages(message):
+                    msg_type = payload.get("type")
+                    if msg_type == "audio":
+                        samples, final = _parse_audio_message(payload)
+                        if samples.size or final:
+                            self.engine.push_samples(
+                                state.stream_id, samples, final=final
+                            )
+                        if final:
+                            state.final_requested = True
+                            return
+                    elif msg_type == "close":
+                        self._request_final(state)
+                        return
+                    elif msg_type == "ping":
+                        await _send_ws_json(ws, send_lock, {"type": "pong"})
+                    else:
+                        await _send_ws_json(
+                            ws,
+                            send_lock,
+                            {"type": "error", "message": "unknown message type"},
+                        )
+        except ConnectionClosed:
+            state.disconnected = True
+            cancel_scope.cancel()
+        except Exception:
+            logging.exception("WS reader loop failed for stream %s", state.stream_id)
+            state.disconnected = True
+            cancel_scope.cancel()
+
     async def _writer_loop(
         self,
         stream: trio.SocketStream,
@@ -177,6 +292,39 @@ class ASRSocketServer:
             cancel_scope.cancel()
         except Exception:
             logging.exception("Writer loop failed for stream %s", state.stream_id)
+            state.disconnected = True
+            cancel_scope.cancel()
+
+    async def _writer_loop_ws(
+        self,
+        ws: Any,
+        state: ConnectionState,
+        send_lock: trio.Lock,
+        cancel_scope: trio.CancelScope,
+    ) -> None:
+        try:
+            last_seq = self.engine.get_update_seq()
+            while True:
+                results = self.engine.collect_stream_results(state.stream_id)
+                for result in results:
+                    payload = _result_payload(result)
+                    await _send_ws_json(ws, send_lock, payload)
+                    if result.is_final:
+                        state.final_requested = True
+                        cancel_scope.cancel()
+                        return
+                if results:
+                    continue
+                last_seq = await trio.to_thread.run_sync(
+                    self.engine.wait_for_update,
+                    last_seq,
+                    abandon_on_cancel=True,
+                )
+        except ConnectionClosed:
+            state.disconnected = True
+            cancel_scope.cancel()
+        except Exception:
+            logging.exception("WS writer loop failed for stream %s", state.stream_id)
             state.disconnected = True
             cancel_scope.cancel()
 
@@ -258,6 +406,23 @@ def _drain_messages(buffer: bytearray) -> Iterable[dict[str, Any]]:
             continue
 
 
+def _drain_ws_messages(message: str | None) -> Iterable[dict[str, Any]]:
+    if not message:
+        return []
+    if isinstance(message, bytes):
+        try:
+            message = message.decode("utf-8")
+        except UnicodeDecodeError:
+            return []
+    for line in str(message).splitlines():
+        if not line.strip():
+            continue
+        try:
+            yield json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+
 def _parse_audio_message(message: dict[str, Any]) -> tuple[np.ndarray, bool]:
     final = bool(message.get("final", False))
     if "samples" in message:
@@ -294,3 +459,43 @@ async def _send_json(
     data = message.encode("utf-8")
     async with lock:
         await stream.send_all(data)
+
+
+async def _send_ws_json(ws: Any, lock: trio.Lock, payload: dict[str, Any]) -> None:
+    message = json.dumps(payload, separators=(",", ":"))
+    async with lock:
+        await _ws_send_message(ws, message)
+
+
+async def _close_ws(ws: Any) -> None:
+    close = getattr(ws, "aclose", None)
+    if close is None:
+        close = getattr(ws, "close", None)
+    if close is None:
+        return
+    result = close()
+    if inspect.isawaitable(result):
+        await result
+
+
+async def _ws_get_message(ws: Any) -> Any:
+    getter = getattr(ws, "get_message", None)
+    if getter is None:
+        getter = getattr(ws, "receive_message", None)
+    if getter is None:
+        raise RuntimeError("WebSocket connection has no message receiver.")
+    result = getter()
+    if inspect.isawaitable(result):
+        return await result
+    return result
+
+
+async def _ws_send_message(ws: Any, message: str) -> None:
+    sender = getattr(ws, "send_message", None)
+    if sender is None:
+        sender = getattr(ws, "send", None)
+    if sender is None:
+        raise RuntimeError("WebSocket connection has no message sender.")
+    result = sender(message)
+    if inspect.isawaitable(result):
+        await result

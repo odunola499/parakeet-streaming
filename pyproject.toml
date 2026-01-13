@@ -20,7 +20,8 @@ dependencies = [
   "safetensors>=0.7.0",
   "soundfile>=0.13.1",
   "trio>=0.32.0",
-  "fastapi>=0.128.0",
+  "trio-websocket>=0.11.0",
+  "trio-websockets>=0.2",
 ]
 
 [project.optional-dependencies]
