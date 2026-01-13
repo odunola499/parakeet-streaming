@@ -24,7 +24,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=8000,
         help="Port to listen for WebSocket clients.",
     )
-    serve.add_argument("--status-port", type=int, default=None)
+    serve.add_argument("--status-port", type=int, default=8050)
     serve.add_argument("--device", default="cpu")
     serve.add_argument("--model-size", choices=("small", "large"), default="small")
     serve.add_argument("--max-num-streams", type=int, default=100)
