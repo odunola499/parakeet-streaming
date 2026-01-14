@@ -70,7 +70,6 @@ class ConvSubsampling(nn.Module):
         super().__init__()
         self._conv_channels = subsampling_conv_channels
         self.feat_in = feat_in
-        self.feat_out = -1
         conv_channels = subsampling_conv_channels
 
         self.sampling_num = int(math.log(subsampling_factor, 2))
@@ -86,7 +85,6 @@ class ConvSubsampling(nn.Module):
         self.ceil_mode = False
         self._left_padding = kernel_size - 1
         self._right_padding = stride - 1
-        self._max_cache_len = subsampling_factor + 1
 
         layers.append(
             CausalConv2D(
