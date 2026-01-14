@@ -23,8 +23,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Port to listen for WebSocket clients.",
     )
     serve.add_argument("--status-port", type=int, default=8050)
-    serve.add_argument("--device", default="cpu")
-    serve.add_argument("--model-size", choices=("small", "large"), default="small")
+    serve.add_argument("--device", default="cuda")
+    serve.add_argument(
+        "--model-size", choices=("small", "large"), default="small", help="Model size"
+    )
     serve.add_argument("--max-num-streams", type=int, default=100)
     serve.add_argument("--sample-rate", type=int, default=16000)
     serve.add_argument("--max-stream-seconds", type=int, default=300)
@@ -42,10 +44,8 @@ def _print_config(
     print("Starting Parakeet streaming socket server")
     print(f"  host: {host}")
     print(f"  port: {port}")
-    if ws_port is not None:
-        print(f"  ws_port: {ws_port}")
-    if status_port is not None:
-        print(f"  status_port: {status_port}")
+    print(f"  ws_port: {ws_port}")
+    print(f"  status_port: {status_port}")
     print(f"  device: {device}")
     print(f"  model_size: {config.size}")
     print(f"  max_num_streams: {config.max_num_streams}")

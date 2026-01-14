@@ -22,9 +22,6 @@ class CausalConv1d(nn.Conv1d):
         self._left_padding = padding[0]
         self._right_padding = padding[1]
 
-        self._max_cache_len = self._left_padding
-        self.cache_drop_size = 0
-
         super().__init__(
             in_channels=in_channels,
             out_channels=out_channels,
@@ -52,10 +49,7 @@ class CausalConv1d(nn.Conv1d):
     def forward(self, x, cache=None):
         x, cache = self.update_cache(x, cache=cache)
         x = super().forward(x)
-        if cache is None:
-            return x
-        else:
-            return x, cache
+        return x, cache
 
 
 class CausalConv2D(nn.Conv2d):
@@ -115,9 +109,7 @@ class ConformerConvolution(nn.Module):
         self,
         hidden_size,
         kernel_size,
-        norm_type="layer_norm",
         use_bias=False,
-        stream=True,
     ):
         super().__init__()
         self.d_model = hidden_size
@@ -144,7 +136,6 @@ class ConformerConvolution(nn.Module):
         )
 
         self.batch_norm = nn.LayerNorm(hidden_size)
-        self.norm_type = norm_type
 
         self.activation = nn.SiLU()
         self.pointwise_conv2 = nn.Conv1d(
@@ -162,16 +153,10 @@ class ConformerConvolution(nn.Module):
         x = F.glu(x, dim=1)
 
         x = x.masked_fill(pad_mask.unsqueeze(1), 0.0)
-        result = self.depthwise_conv(x, cache=cache)
-        if isinstance(result, tuple):
-            x, cache = result
-        else:
-            x = result
+        x, cache = self.depthwise_conv(x, cache=cache)
         x = self.batch_norm(x.transpose(1, 2)).transpose(1, 2)
 
         x = self.activation(x)
         x = self.pointwise_conv2(x)
         x = x.transpose(1, 2)
-        if cache is None:
-            return x
         return x, cache

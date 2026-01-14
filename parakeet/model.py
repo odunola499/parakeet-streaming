@@ -83,7 +83,6 @@ class Parakeet(nn.Module, GenerationMixin):
             att_context_size=config.enc_att_context_size,
             subsampling_conv_channels=config.subsampling_conv_channels,
             use_bias=config.use_bias,
-            stream=config.stream,
         )
 
         self.predictor = Predictor(

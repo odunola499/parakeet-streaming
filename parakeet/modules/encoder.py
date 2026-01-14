@@ -95,16 +95,8 @@ class ConformerEncoder(nn.Module):
         att_context_size,
         subsampling_conv_channels: int,
         use_bias: bool,
-        stream: bool = True,
-        chunk_size: list | tuple = (9, 16),
-        shift_size: list | tuple = (9, 16),
-        cache_drop_size: int = 0,
-        last_channel_cache_size: int = 70,
-        valid_out_len: int = 2,
         pre_encode_cache_size: list | tuple = (0, 9),
         drop_extra_pre_encoded: int = 2,
-        last_channel_num: int = 0,
-        last_time_num: int = 0,
     ):
         super().__init__()
 
@@ -142,16 +134,8 @@ class ConformerEncoder(nn.Module):
 
         self.att_context_size: list = att_context_size
         self.conv_kernel_size = conv_kernel_size
-        self.stream = stream
-        self.chunk_size = chunk_size
-        self.shift_size = shift_size
-        self.cache_drop_size = cache_drop_size
-        self.last_channel_cache_size = last_channel_cache_size
-        self.valid_out_len = valid_out_len
         self.pre_encode_cache_size = pre_encode_cache_size
         self.drop_extra_pre_encoded = drop_extra_pre_encoded
-        self.last_channel_num = last_channel_num
-        self.last_time_num = last_time_num
 
     def init_streaming_state(
         self,

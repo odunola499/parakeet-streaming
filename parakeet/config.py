@@ -21,8 +21,6 @@ class ModelConfig:
     joint_hidden_dim: int = 640
     vocab_size: int = 1026
 
-    stream: bool = True
-
 
 @dataclass
 class LargeModelConfig(ModelConfig):

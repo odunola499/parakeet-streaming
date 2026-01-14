@@ -17,13 +17,11 @@ The small model emits an end-of-utterance (EOU) token  and is designed for low-l
 without punctuation or
 capitalization. The large model supports punctuation and capitalization.
 
-Model weights are governed by NVIDIA's Open Model License (NeMo). The model implementation in this repo
-rewrites the q, k, v layers  in FastConformer to be a single linear layer ```qkv``` and
-chunks this to get the query, key and values.
-Because of this, weights of both models are saved in the ```safetensors``` format in a separate huggingface repo for
+Model weights are governed by NVIDIA's Open Model License (NeMo).
+The model weights of both models are also saved in the ```safetensors``` format in a separate huggingface repo for
 easier loading.
-This also allows for faster weight loading but the official
-license terms still apply.
+This also allows for faster weight loading but the official NeMO
+license terms still apply for the model checkpoints.
 
 Expected latency is about 160 ms. On an NVIDIA A100, the small model supports around
 80 concurrent streams and the large model supports around 60 concurrent streams.
@@ -64,7 +62,8 @@ Only `pcm16` and `f32` encodings are supported. The server responds with `result
 messages that include `text`, `token_ids`, and `is_final`.
 
 There is no VAD integration yet, so silence is not handled automatically. Today, the
-client ends a stream by sending `final: true` or `close`. In a future release, the
+client ends a stream by sending `final: true` or `close`, or closing the connection. In a future release, the
 server will assert `final` based on silence detection instead of requiring the
 client to decide when a stream is finished.
-Please refer to the ```docs``` folder for more information on how to get started.
+Please refer to the ```docs``` folder for more information on how to get started,
+including Python and TS client quickstarts)

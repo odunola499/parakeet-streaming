@@ -1,3 +1,4 @@
+import os
 import argparse
 import time
 
@@ -10,12 +11,10 @@ from parakeet.config import Config
 from parakeet.engine.asr_engine import ASREngine
 
 
-def feed_engine(stream_id, audio, chunk_samples, engine, sleep_seconds: float):
+def feed_engine(stream_id, audio, chunk_samples, engine):
     for start in range(0, len(audio), chunk_samples):
         chunk = audio[start : start + chunk_samples]
         engine.push_samples(stream_id, chunk, final=False)
-        if sleep_seconds > 0:
-            time.sleep(sleep_seconds)
     engine.push_samples(stream_id, np.empty((0,), dtype=np.float32), final=True)
 
 
@@ -39,21 +38,12 @@ def parse_args():
     parser.add_argument(
         "--audio",
         nargs="*",
-        default=[
-            "/Users/odunolajenrola/Documents/GitHub/parakeet-streaming/test.mp3",
-            "/Users/odunolajenrola/Documents/GitHub/parakeet-streaming/test_2.mp3",
-        ],
+        default=os.listdir("audio"),
     )
     parser.add_argument("--duration", type=float, default=10)
     parser.add_argument("--sample-rate", type=int, default=16000)
     parser.add_argument("--chunk-seconds", type=float, default=0.25)
     parser.add_argument("--model-size", choices=("small", "large"), default="small")
-    parser.add_argument(
-        "--stream-speed",
-        type=float,
-        default=2.0,
-        help="1.0 = real-time, >1.0 = faster than real-time, <=0 = no sleep",
-    )
     parser.add_argument("--quiet", action="store_true")
     return parser.parse_args()
 
@@ -75,14 +65,15 @@ def main():
         audios.append(audio)
 
     chunk_samples = int(args.chunk_seconds * args.sample_rate)
-    if args.stream_speed > 0:
-        sleep_seconds = args.chunk_seconds / args.stream_speed
-    else:
-        sleep_seconds = 0.0
     producers = [
         threading.Thread(
             target=feed_engine,
-            args=(stream_id, audio, chunk_samples, engine, sleep_seconds),
+            args=(
+                stream_id,
+                audio,
+                chunk_samples,
+                engine,
+            ),
         )
         for stream_id, audio in zip(stream_ids, audios)
     ]
