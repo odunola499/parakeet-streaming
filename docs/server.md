@@ -41,8 +41,10 @@ includes a `stream_id` and `sample_rate`. Clients then send `audio` messages unt
 choose to finalize the stream. Finalization happens when the client sends a message with
 `final: true` or sends a separate `close` message. The server emits `result` messages as
 it decodes, and the final transcript is marked with `is_final: true`. Each `result`
-includes `text`, `token_ids`, and `confidence_scores` (aligned to the newly emitted
-tokens).
+includes `text`, `token_ids`, `confidence_scores` (aligned to the newly emitted
+tokens), `last_state`, and `turn_detection`.
+`turn_detection` reports `start_of_utterance`, `running`, `pause`, or
+`end_of_utterance`, while `last_state` reports `speech`, `silence`, or `null`.
 
 A client can send `ping` to verify liveness. The server replies with `pong`.
 
@@ -94,5 +96,5 @@ simple health checks and dashboards.
 The server logs to stdout at INFO level by default. If you want more detail, adjust the
 logging configuration in `parakeet/cli.py` or wrap the server in your own entrypoint.
 
-There is currently no VAD integration. Silence is not handled automatically, so clients
-must choose when to finalize a stream.
+Turn detection metadata is included in `result` payloads, but silence is not handled
+automatically. Clients must choose when to finalize a stream.

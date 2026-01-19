@@ -70,6 +70,10 @@ class Sequence:
         self.td_queue: Queue[np.ndarray] = Queue(maxsize=20)
         self.td_array = np.zeros(128000, dtype=np.float32)
         self.vad_buf = np.zeros((0,), dtype=np.float32)
+        self.td_queued = False
+        self.last_emitted_turn_position: Literal[
+            "start_of_utterance", "running", "pause", "end_of_utterance", None
+        ] = None
 
         self.token_ids: list[int] = []
         self.confidence_scores: list[float] = []
@@ -214,3 +218,5 @@ class Sequence:
 
         self.td_array = None
         self.vad_buf = None
+        self.td_queued = False
+        self.last_emitted_turn_position = None

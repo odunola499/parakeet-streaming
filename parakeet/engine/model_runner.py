@@ -2,6 +2,7 @@ from dataclasses import dataclass
 import queue
 import threading
 
+import numpy as np
 import torch
 
 from parakeet.config import Config
@@ -35,6 +36,7 @@ class ModelRunner:
         self._stop_event = threading.Event()
         self._threads: list[threading.Thread] = []
         self._results_queue: queue.Queue[DecodeResult] = queue.Queue()
+        self._td_ready_queue: queue.SimpleQueue[Sequence] = queue.SimpleQueue()
         self._update_cond = threading.Condition()
         self._update_seq = 0
 
@@ -154,9 +156,13 @@ class ModelRunner:
             self._update_cond.wait(timeout=timeout)
             return self._update_seq
 
+    def queue_turn_detection(self, seq: Sequence) -> None:
+        self._td_ready_queue.put(seq)
+
     def _turn_detection_loop(self, interval: float) -> None:
         while not self._stop_event.is_set():
             self._turn_detection_step()
+            self._stop_event.wait(interval)
 
     def _pre_encode_loop(self, interval: float) -> None:
         while not self._stop_event.is_set():
@@ -182,11 +188,55 @@ class ModelRunner:
             self._stop_event.wait(interval)
 
     def _turn_detection_step(self) -> None:
-        for seq in self.scheduler.active_sequences():
+        ready_seqs: list[Sequence] = []
+        while True:
+            try:
+                ready_seqs.append(self._td_ready_queue.get_nowait())
+            except queue.Empty:
+                break
+
+        if not ready_seqs:
+            return
+
+        seq_chunks: list[tuple[Sequence, np.ndarray]] = []
+        for seq in ready_seqs:
             if seq.status == SequenceStatus.FINISHED:
+                with seq.lock:
+                    seq.td_queued = False
                 continue
-            if seq.has_pending_td():
-                self.turn_detection(seq)
+            try:
+                chunk = seq.td_queue.get_nowait()
+            except queue.Empty:
+                with seq.lock:
+                    seq.last_state = None
+                    seq.td_queued = False
+                continue
+            seq_chunks.append((seq, chunk))
+
+        if seq_chunks:
+            self.turn_detection.process_batch(seq_chunks)
+
+        turn_updates = 0
+        for seq, _ in seq_chunks:
+            with seq.lock:
+                turn_position = seq.turn_position
+                if turn_position and turn_position != seq.last_emitted_turn_position:
+                    seq.last_emitted_turn_position = turn_position
+                    self._results_queue.put(DecodeResult(seq.request_id, [], []))
+                    turn_updates += 1
+
+        for seq, _ in seq_chunks:
+            requeue = False
+            with seq.lock:
+                if not seq.td_queue.empty():
+                    requeue = True
+                else:
+                    seq.td_queued = False
+            if requeue:
+                self._td_ready_queue.put(seq)
+
+        if turn_updates:
+            self._notify_update()
 
     def _pre_encode_step(self) -> None:
         for seq in self.scheduler.active_sequences():
@@ -359,7 +409,7 @@ class ModelRunner:
                     continue
             self._release_sequence(seq)
             if seq.request_id not in result_ids:
-                self._results_queue.put(DecodeResult(seq.request_id, []))
+                self._results_queue.put(DecodeResult(seq.request_id, [], []))
             finalized = True
         return finalized
 

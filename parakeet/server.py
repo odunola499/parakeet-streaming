@@ -455,6 +455,8 @@ def _result_payload(result: StreamResult) -> dict[str, Any]:
         "token_ids": result.token_ids,
         "confidence_scores": result.confidence_scores,
         "is_final": result.is_final,
+        "last_state": result.last_state,
+        "turn_detection": result.turn_detection,
     }
 
 

@@ -60,10 +60,13 @@ Audio messages look like this:
 ```
 
 Only `pcm16` and `f32` encodings are supported. The server responds with `result`
-messages that include `text`, `token_ids`, `confidence_scores`, and `is_final`.
-`confidence_scores` are aligned with `token_ids` for the newly emitted tokens.
+messages that include `text`, `token_ids`, `confidence_scores`, `is_final`,
+`last_state`, and `turn_detection`. `confidence_scores` are aligned with `token_ids`
+for the newly emitted tokens.
+`turn_detection` reports `start_of_utterance`, `running`, `pause`, or
+`end_of_utterance`, while `last_state` reports `speech`, `silence`, or `null`.
 
-There is no VAD integration yet, so silence is not handled automatically. Today, the
-client ends a stream by sending `final: true` or `close`, or closing the connection.
-Please refer to the ```docs``` folder for more information on how to get started,
-including Python and TS client quickstarts)
+Turn detection metadata is included in `result` payloads, but streams still require
+client finalization by sending `final: true` or `close`, or closing the connection.
+Please refer to the `docs` folder for more information on how to get started,
+including Python and TS client quickstarts.

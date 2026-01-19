@@ -47,8 +47,14 @@ class ASREngine:
             seq = self.streams.get(stream_id)
         if seq is None:
             return
+        notify_td = False
         with seq.lock:
             seq.push_samples(samples, final=final)
+            if samples.size and not seq.td_queued:
+                seq.td_queued = True
+                notify_td = True
+        if notify_td:
+            self.runner.queue_turn_detection(seq)
 
     def get_update_seq(self) -> int:
         return self.runner.get_update_seq()
@@ -66,12 +72,16 @@ class ASREngine:
             with seq.lock:
                 text = self.tokenizer.decode(list(seq.token_ids))
                 is_final = seq.is_finished
+                last_state = seq.last_state
+                turn_detection = seq.turn_position
             stream_result = StreamResult(
                 stream_id=item.seq_id,
                 text=text,
                 token_ids=item.token_ids,
                 is_final=is_final,
                 confidence_scores=item.confidence_scores,
+                last_state=last_state,
+                turn_detection=turn_detection,
             )
             self._stream_results.setdefault(item.seq_id, deque()).append(stream_result)
             if is_final:

@@ -64,27 +64,59 @@ class TurnDetection:
         )
 
     @torch.no_grad()
-    def infer_vad(self, seq: Sequence, samples: np.ndarray) -> float:
-        if samples.size == 0:
-            return 0.0
+    def infer_vad_batch(
+        self, seq_chunks: list[tuple[Sequence, np.ndarray]]
+    ) -> list[float]:
+        if not seq_chunks:
+            return []
 
-        with seq.lock:
-            if seq.vad_buf.size == 0:
-                seq.vad_buf = samples
-            else:
-                seq.vad_buf = np.concatenate([seq.vad_buf, samples], axis=0)
+        frame_counts: list[int] = []
+        frames_list: list[np.ndarray] = []
+        for seq, samples in seq_chunks:
+            if samples.size == 0:
+                frame_counts.append(0)
+                continue
 
-            frame_count = seq.vad_buf.shape[0] // VAD_FRAME_SAMPLES
-            if frame_count == 0:
-                return 0.0
-            frames = np.split(
-                seq.vad_buf[: frame_count * VAD_FRAME_SAMPLES],
-                frame_count,
-            )
-            seq.vad_buf = seq.vad_buf[frame_count * VAD_FRAME_SAMPLES :]
+            with seq.lock:
+                if seq.vad_buf.size == 0:
+                    seq.vad_buf = samples
+                else:
+                    seq.vad_buf = np.concatenate([seq.vad_buf, samples], axis=0)
 
-        probs = [self.vad(torch.from_numpy(frame), self.sr).item() for frame in frames]
-        return float(np.mean(probs)) if probs else 0.0
+                frame_count = seq.vad_buf.shape[0] // VAD_FRAME_SAMPLES
+                if frame_count:
+                    frames = seq.vad_buf[: frame_count * VAD_FRAME_SAMPLES].reshape(
+                        frame_count, VAD_FRAME_SAMPLES
+                    )
+                    seq.vad_buf = seq.vad_buf[frame_count * VAD_FRAME_SAMPLES :]
+                else:
+                    frames = None
+
+            frame_counts.append(frame_count)
+            if frame_count:
+                frames_list.append(frames)
+
+        if not frames_list:
+            return [0.0 for _ in seq_chunks]
+
+        batch_frames = np.concatenate(frames_list, axis=0).astype(
+            np.float32, copy=False
+        )
+        vad_out = self.vad(torch.from_numpy(batch_frames), self.sr)
+        if isinstance(vad_out, torch.Tensor):
+            probs = vad_out.detach().cpu().numpy().reshape(-1)
+        else:
+            probs = np.asarray(vad_out).reshape(-1)
+
+        vad_probs: list[float] = []
+        idx = 0
+        for count in frame_counts:
+            if count == 0:
+                vad_probs.append(0.0)
+                continue
+            vad_probs.append(float(np.mean(probs[idx : idx + count])))
+            idx += count
+        return vad_probs
 
     def infer_turn(self, array):
         inputs = self.feature_extractor(
@@ -103,6 +135,70 @@ class TurnDetection:
 
         return {"prediction": prediction, "probability": probability}
 
+    def process_batch(self, seq_chunks: list[tuple[Sequence, np.ndarray]]) -> None:
+        if not seq_chunks:
+            return
+
+        vad_probs = self.infer_vad_batch(seq_chunks)
+        now = time.time()
+
+        for (seq, chunk), vad_prob in zip(seq_chunks, vad_probs):
+            chunk_size = chunk.shape[0]
+            is_speech = vad_prob >= VAD_THRESHOLD
+
+            with seq.lock:
+                if is_speech:
+                    seq.speech_run += chunk_size
+                    seq.silence_run = 0
+                else:
+                    seq.silence_run += chunk_size
+                    seq.speech_run = 0
+
+                if not seq.turn_active and seq.speech_run >= self.speech_start_dur:
+                    seq.turn_active = True
+                    seq.td_array[:] = 0.0
+                    seq.speech_run = 0
+                    seq.last_endpoint_check = 0
+                    if seq.last_state != "speech":
+                        seq.turn_position = "start_of_utterance"
+                        seq.last_state = "speech"
+
+                if seq.turn_active:
+                    seq.td_array[:-chunk_size] = seq.td_array[chunk_size:]
+                    seq.td_array[-chunk_size:] = chunk
+
+                    if is_speech and seq.last_state != "speech":
+                        seq.turn_position = "running"
+                        seq.last_state = "speech"
+
+                    if (not is_speech) and seq.last_state != "silence":
+                        seq.last_state = "silence"
+
+                if (
+                    seq.silence_run >= self.silence_end_dur
+                    and (now - seq.last_endpoint_check) >= 0.1
+                ):
+                    seq.last_endpoint_check = now
+
+                    pred = self.infer_turn(seq.td_array)
+                    if pred["prediction"] == 1:
+                        seq.turn_position = "end_of_utterance"
+                        seq.turn_active = False
+                        seq.td_array[:] = 0.0
+                        seq.speech_run = 0
+                        seq.silence_run = 0
+                        seq.last_state = None
+
+                    else:
+                        seq.turn_position = "pause"
+
+                    if seq.silence_run >= self.reset_after_dur:
+                        seq.turn_active = False
+                        seq.td_array[:] = 0.0
+                        seq.speech_run = 0
+                        seq.silence_run = 0
+                        seq.last_state = None
+
     def __call__(self, seq: Sequence):
         try:
             chunk = seq.td_queue.get(timeout=0.01)
@@ -111,60 +207,4 @@ class TurnDetection:
                 seq.last_state = None
             return
 
-        chunk_size = chunk.shape[0]
-        vad_prob = self.infer_vad(seq, chunk)
-        is_speech = vad_prob >= VAD_THRESHOLD
-        now = time.time()
-
-        with seq.lock:
-            if is_speech:
-                seq.speech_run += chunk_size
-                seq.silence_run = 0
-            else:
-                seq.silence_run += chunk_size
-                seq.speech_run = 0
-
-            if not seq.turn_active and seq.speech_run >= self.speech_start_dur:
-                seq.turn_active = True
-                seq.td_array[:] = 0.0
-                seq.speech_run = 0
-                seq.last_endpoint_check = 0
-                if seq.last_state != "speech":
-                    seq.turn_position = "start_of_utterance"
-                    seq.last_state = "speech"
-
-            if seq.turn_active:
-                seq.td_array[:-chunk_size] = seq.td_array[chunk_size:]
-                seq.td_array[-chunk_size:] = chunk
-
-                if is_speech and seq.last_state != "speech":
-                    seq.turn_position = "running"
-                    seq.last_state = "speech"
-
-                if (not is_speech) and seq.last_state != "silence":
-                    seq.last_state = "silence"
-
-            if (
-                seq.silence_run >= self.silence_end_dur
-                and (now - seq.last_endpoint_check) >= 0.1
-            ):
-                seq.last_endpoint_check = now
-
-                pred = self.infer_turn(seq.td_array)
-                if pred["prediction"] == 1:
-                    seq.turn_position = "end_of_utterance"
-                    seq.turn_active = False
-                    seq.td_array[:] = 0.0
-                    seq.speech_run = 0
-                    seq.silence_run = 0
-                    seq.last_state = None
-
-                else:
-                    seq.turn_position = "pause"
-
-                if seq.silence_run >= self.reset_after_dur:
-                    seq.turn_active = False
-                    seq.td_array[:] = 0.0
-                    seq.speech_run = 0
-                    seq.silence_run = 0
-                    seq.last_state = None
+        self.process_batch([(seq, chunk)])

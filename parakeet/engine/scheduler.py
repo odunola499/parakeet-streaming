@@ -16,6 +16,8 @@ class StreamResult:
     token_ids: list[int]
     is_final: bool
     confidence_scores: list[float]
+    last_state: str | None
+    turn_detection: str | None
 
 
 class Scheduler:
