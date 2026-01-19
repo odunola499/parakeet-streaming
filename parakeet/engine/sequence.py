@@ -1,7 +1,9 @@
 from collections import deque
+from typing import Literal
 import threading
 from enum import Enum, auto
 from itertools import count
+from queue import Queue, Full, Empty
 
 import numpy as np
 import torch
@@ -56,12 +58,38 @@ class Sequence:
         self._fe_emitted_frames = 0
         self._fe_sample_offset = 0
 
+        # Turn Detection / VAD
+        self.last_state: Literal["silence", "speech", None] = None
+        self.turn_position: Literal[
+            "start_of_utterance", "running", "pause", "end_of_utterance", None
+        ] = None
+        self.turn_active = False
+        self.speech_run = 0
+        self.silence_run = 0
+        self.last_endpoint_check = 0.0
+        self.td_queue: Queue[np.ndarray] = Queue(maxsize=20)
+        self.td_array = np.zeros(128000, dtype=np.float32)
+        self.vad_buf = np.zeros((0,), dtype=np.float32)
+
         self.token_ids: list[int] = []
+        self.confidence_scores: list[float] = []
         self.final = False
         self.in_flight = 0
 
     def push_samples(self, samples: np.ndarray, final: bool = False):
         if samples.size:
+            try:
+                self.td_queue.put_nowait(samples)
+            except Full:
+                try:
+                    self.td_queue.get_nowait()
+                except Empty:
+                    pass
+                try:
+                    self.td_queue.put_nowait(samples)
+                except Full:
+                    pass
+
             if self._pending_len + samples.size > self._pending_capacity:
                 raise RuntimeError("Stream buffer overflow.")
             write_pos = (
@@ -115,6 +143,9 @@ class Sequence:
     def has_pending_audio(self) -> bool:
         return bool(self.raw_queue)
 
+    def has_pending_td(self) -> bool:
+        return not self.td_queue.empty()
+
     def has_chunk_ready(self) -> bool:
         if self.enc_buffer is None:
             return False
@@ -162,9 +193,12 @@ class Sequence:
     def is_finished(self) -> bool:
         return self.status == SequenceStatus.FINISHED
 
-    def append_tokens(self, token_ids: list[int]) -> None:
+    def append_tokens(
+        self, token_ids: list[int], confidence_scores: list[float]
+    ) -> None:
         if token_ids:
             self.token_ids.extend(token_ids)
+            self.confidence_scores.extend(confidence_scores)
 
     def cleanup(self) -> None:
         self.raw_queue.clear()
@@ -177,3 +211,6 @@ class Sequence:
         self._fe_samples = np.empty((0,), dtype=np.float32)
         self._fe_emitted_frames = 0
         self._fe_sample_offset = 0
+
+        self.td_array = None
+        self.vad_buf = None

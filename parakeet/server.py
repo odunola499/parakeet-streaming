@@ -453,6 +453,7 @@ def _result_payload(result: StreamResult) -> dict[str, Any]:
         "stream_id": result.stream_id,
         "text": result.text,
         "token_ids": result.token_ids,
+        "confidence_scores": result.confidence_scores,
         "is_final": result.is_final,
     }
 

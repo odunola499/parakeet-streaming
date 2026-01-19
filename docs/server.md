@@ -14,7 +14,7 @@ source .venv/bin/activate
 pip install -U pip
 pip install -e .
 
-parakeet-server serve --host 0.0.0.0 --port 8765 --ws-port 8766 --device cuda
+parakeet-server serve --host 0.0.0.0 --port 8765 --ws-port 8000 --device cuda
 ```
 
 The first run downloads model weights from Hugging Face. Subsequent runs reuse the
@@ -40,7 +40,9 @@ Each connection creates a stream in the engine. The server sends a `hello` messa
 includes a `stream_id` and `sample_rate`. Clients then send `audio` messages until they
 choose to finalize the stream. Finalization happens when the client sends a message with
 `final: true` or sends a separate `close` message. The server emits `result` messages as
-it decodes, and the final transcript is marked with `is_final: true`.
+it decodes, and the final transcript is marked with `is_final: true`. Each `result`
+includes `text`, `token_ids`, and `confidence_scores` (aligned to the newly emitted
+tokens).
 
 A client can send `ping` to verify liveness. The server replies with `pong`.
 
@@ -93,6 +95,4 @@ The server logs to stdout at INFO level by default. If you want more detail, adj
 logging configuration in `parakeet/cli.py` or wrap the server in your own entrypoint.
 
 There is currently no VAD integration. Silence is not handled automatically, so clients
-must choose when to finalize a stream. In a future release, the server will assert
-`is_final` based on silence detection instead of requiring the client to decide when a
-stream is finished.
+must choose when to finalize a stream.

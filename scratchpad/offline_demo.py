@@ -10,6 +10,9 @@ import threading
 from parakeet.config import Config
 from parakeet.engine.asr_engine import ASREngine
 
+AUDIO_DIR = "/Users/odunolajenrola/Documents/GitHub/parakeet-streaming/audio"
+AUDIO_FILES = [os.path.join(AUDIO_DIR, i) for i in os.listdir(AUDIO_DIR)]
+
 
 def feed_engine(stream_id, audio, chunk_samples, engine):
     for start in range(0, len(audio), chunk_samples):
@@ -34,11 +37,11 @@ def pull_from_engine(stream_id, engine, show_text: bool = True):
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--num-streams", type=int, default=2)
+    parser.add_argument("--num-streams", type=int, default=1)
     parser.add_argument(
         "--audio",
         nargs="*",
-        default=os.listdir("audio"),
+        default=AUDIO_FILES,
     )
     parser.add_argument("--duration", type=float, default=10)
     parser.add_argument("--sample-rate", type=int, default=16000)

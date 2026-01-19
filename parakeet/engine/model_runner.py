@@ -7,6 +7,7 @@ import torch
 from parakeet.config import Config
 from parakeet.engine.scheduler import Scheduler
 from parakeet.engine.sequence import Sequence, SequenceStatus
+from parakeet.engine.turn_detection import TurnDetection
 from parakeet.model import Parakeet
 
 
@@ -14,6 +15,7 @@ from parakeet.model import Parakeet
 class DecodeResult:
     seq_id: int
     token_ids: list[int]
+    confidence_scores: list[float]
 
 
 class ModelRunner:
@@ -39,6 +41,7 @@ class ModelRunner:
     def _init_model(self) -> None:
         self.model = Parakeet.from_pretrained(self.config.size).to(self.device)
         self.model.eval()
+        self.turn_detection = TurnDetection()
 
         self.encoder = self.model.encoder
         self.pre_encoder = self.encoder.pre_encode
@@ -116,6 +119,9 @@ class ModelRunner:
             ),
             threading.Thread(target=self._encode_loop, args=(interval,), daemon=True),
             threading.Thread(target=self._decode_loop, args=(interval,), daemon=True),
+            threading.Thread(
+                target=self._turn_detection_loop, args=(interval,), daemon=True
+            ),
         ]
         for thread in self._threads:
             thread.start()
@@ -148,6 +154,10 @@ class ModelRunner:
             self._update_cond.wait(timeout=timeout)
             return self._update_seq
 
+    def _turn_detection_loop(self, interval: float) -> None:
+        while not self._stop_event.is_set():
+            self._turn_detection_step()
+
     def _pre_encode_loop(self, interval: float) -> None:
         while not self._stop_event.is_set():
             self.scheduler.admit_ready()
@@ -170,6 +180,13 @@ class ModelRunner:
             if results or finalized:
                 self._notify_update()
             self._stop_event.wait(interval)
+
+    def _turn_detection_step(self) -> None:
+        for seq in self.scheduler.active_sequences():
+            if seq.status == SequenceStatus.FINISHED:
+                continue
+            if seq.has_pending_td():
+                self.turn_detection(seq)
 
     def _pre_encode_step(self) -> None:
         for seq in self.scheduler.active_sequences():
@@ -315,12 +332,14 @@ class ModelRunner:
                     batch_chunks.append(chunk)
 
         if batch_seqs:
-            token_lists = self._decode_batch(batch_seqs, batch_chunks)
-            for seq, tokens in zip(batch_seqs, token_lists):
+            token_lists, confidence_scores = self._decode_batch(
+                batch_seqs, batch_chunks
+            )
+            for seq, tokens, scores in zip(batch_seqs, token_lists, confidence_scores):
                 if tokens:
                     with seq.lock:
-                        seq.append_tokens(tokens)
-                    results.append(DecodeResult(seq.request_id, tokens))
+                        seq.append_tokens(tokens, scores)
+                    results.append(DecodeResult(seq.request_id, tokens, scores))
 
         return results
 
@@ -344,9 +363,7 @@ class ModelRunner:
             finalized = True
         return finalized
 
-    def _decode_batch(
-        self, seqs: list[Sequence], chunks: list[torch.Tensor]
-    ) -> list[list[int]]:
+    def _decode_batch(self, seqs: list[Sequence], chunks: list[torch.Tensor]):
         lengths = [int(chunk.size(2)) for chunk in chunks]
         order = sorted(range(len(seqs)), key=lengths.__getitem__, reverse=True)
         sorted_seqs = [seqs[i] for i in order]
@@ -355,6 +372,7 @@ class ModelRunner:
         sorted_pred_outs = [seq.pred_out for seq in sorted_seqs]
         sorted_pred_states = [seq.pred_state for seq in sorted_seqs]
         token_lists_sorted = [[] for _ in sorted_seqs]
+        confidence_scores_sorted = [[] for _ in sorted_seqs]
 
         with torch.inference_mode():
             max_len = sorted_lengths[0]
@@ -385,15 +403,20 @@ class ModelRunner:
                     pred_out_batch[row : row + 1].copy_(sorted_pred_outs[row])
 
                 state_batch = self._stack_states(sorted_pred_states[:batch_size])
-                pred_out_active, state_batch, new_tokens = self._decode_frame_batch(
-                    frame_batch[:batch_size],
-                    pred_out_batch[:batch_size],
-                    state_batch,
+                pred_out_active, state_batch, new_tokens, confidence_scores = (
+                    self._decode_frame_batch(
+                        frame_batch[:batch_size],
+                        pred_out_batch[:batch_size],
+                        state_batch,
+                    )
                 )
 
-                for row, tokens in enumerate(new_tokens):
+                for row, (tokens, conf_score) in enumerate(
+                    zip(new_tokens, confidence_scores)
+                ):
                     if tokens:
                         token_lists_sorted[row].extend(tokens)
+                        confidence_scores_sorted[row].extend(conf_score)
 
                 split_pred_outs = torch.split(pred_out_active, 1, dim=0)
                 split_states = self._unstack_states(state_batch)
@@ -408,9 +431,11 @@ class ModelRunner:
             seq.pred_state = pred_state
 
         token_lists = [[] for _ in seqs]
+        confidence_scores = [[] for _ in seqs]
         for sorted_idx, original_idx in enumerate(order):
             token_lists[original_idx] = token_lists_sorted[sorted_idx]
-        return token_lists
+            confidence_scores[original_idx] = confidence_scores_sorted[sorted_idx]
+        return token_lists, confidence_scores
 
     def _decode_frame_batch(
         self,
@@ -419,32 +444,37 @@ class ModelRunner:
         state_batch,
     ):
         token_lists = [[] for _ in range(frame_batch.size(0))]
+        token_confs = [[] for _ in range(frame_batch.size(0))]
+
         for _ in range(self._max_symbols_per_frame):
             logits = self.joiner(frame_batch, pred_out_batch)
             ids = logits.argmax(-1)
+            log_probs = torch.log_softmax(logits, dim=-1)
+            token_logp = log_probs.gather(-1, ids.unsqueeze(1)).squeeze(-1)
+            token_conf = token_logp.exp()
+
             blank_mask = ids == self.blank_id
             if bool(blank_mask.all()):
                 break
 
-            for idx, token_id in enumerate(ids.tolist()):
+            for idx, (token_id, conf) in enumerate(
+                zip(ids.tolist(), token_conf.tolist())
+            ):
                 if token_id != self.blank_id:
                     token_lists[idx].append(token_id)
+                    token_confs[idx].append(conf)
 
             new_pred_out, new_state = self.decoder(ids, state=state_batch)
             pred_out_batch = torch.where(
                 blank_mask.unsqueeze(-1), pred_out_batch, new_pred_out
             )
-            if isinstance(state_batch, tuple):
-                state_batch = tuple(
-                    torch.where(blank_mask.view(1, -1, 1), old, new)
-                    for old, new in zip(state_batch, new_state)
-                )
-            else:
-                state_batch = torch.where(
-                    blank_mask.view(1, -1, 1), state_batch, new_state
-                )
 
-        return pred_out_batch, state_batch, token_lists
+            state_batch = tuple(
+                torch.where(blank_mask.view(1, -1, 1), old, new)
+                for old, new in zip(state_batch, new_state)
+            )
+
+        return pred_out_batch, state_batch, token_lists, token_confs
 
     def _stack_states(self, states):
         if isinstance(states[0], tuple):

@@ -6,7 +6,7 @@ port.
 
 Example server command:
 ```bash
-parakeet-server serve --host 0.0.0.0 --port 8765 --ws-port 8766 --device cuda
+parakeet-server serve --host 0.0.0.0 --port 8765 --ws-port 8000 --device cuda
 ```
 
 To verify the server is reachable, connect and read the `hello` message, then send a
@@ -34,7 +34,7 @@ import numpy as np
 import soundfile as sf
 import websockets
 
-HOST, PORT = "127.0.0.1", 8766
+HOST, PORT = "127.0.0.1", 8000
 AUDIO_PATH = "./test.wav"
 CHUNK_SECONDS = 0.25
 
@@ -81,6 +81,9 @@ async def main():
 
 asyncio.run(main())
 ```
+
+Result messages also include `token_ids` and `confidence_scores`, aligned to the
+newly emitted tokens.
 
 ## Scenario 2: Raw TCP smoke test (send silence, then finalize)
 

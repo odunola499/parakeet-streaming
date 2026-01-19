@@ -15,6 +15,7 @@ class StreamResult:
     text: str
     token_ids: list[int]
     is_final: bool
+    confidence_scores: list[float]
 
 
 class Scheduler:

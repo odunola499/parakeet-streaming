@@ -105,12 +105,8 @@ class Parakeet(nn.Module, GenerationMixin):
         raise NotImplementedError
 
     @classmethod
-    def from_pretrained(cls, size: Literal["small", "large"] | ModelConfig = "small"):
-        if isinstance(size, ModelConfig):
-            config = size
-            size = "large" if isinstance(config, LargeModelConfig) else "small"
-        else:
-            config = CONFIG_MAP[size]()
+    def from_pretrained(cls, size: Literal["small", "large"] = "small"):
+        config = CONFIG_MAP[size]()
 
         repo_id = WEIGHTS_MAP[size]
         model_path = hf_hub_download(repo_id=repo_id, filename="model.safetensors")

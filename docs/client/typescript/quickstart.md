@@ -5,7 +5,7 @@ server must already be running.
 
 Example server command:
 ```bash
-parakeet-server serve --host 0.0.0.0 --port 8765 --ws-port 8766 --device cuda
+parakeet-server serve --host 0.0.0.0 --port 8765 --ws-port 8000 --device cuda
 ```
 
 To verify the server is reachable, connect and read the `hello` message, then send a
@@ -19,7 +19,7 @@ sends PCM16 chunks over WebSockets. This uses `ScriptProcessorNode` for simplici
 production, use `AudioWorklet` instead.
 
 ```ts
-const ws = new WebSocket("ws://127.0.0.1:8766");
+const ws = new WebSocket("ws://127.0.0.1:8000");
 
 ws.addEventListener("message", (event) => {
   const msg = JSON.parse(event.data as string);
@@ -59,6 +59,9 @@ When you stop recording, send a final marker so the server can finalize the stre
 ```ts
 ws.send(JSON.stringify({ type: "audio", data: "", encoding: "pcm16", final: true }));
 ```
+
+Result messages also include `token_ids` and `confidence_scores`, aligned to the
+newly emitted tokens.
 
 ## Scenario 2: Node raw TCP smoke test
 

@@ -71,6 +71,7 @@ class ASREngine:
                 text=text,
                 token_ids=item.token_ids,
                 is_final=is_final,
+                confidence_scores=item.confidence_scores,
             )
             self._stream_results.setdefault(item.seq_id, deque()).append(stream_result)
             if is_final:
