@@ -23,7 +23,7 @@ async def verify_ws(uri: str) -> None:
         print("hello:", hello)
         print("pong:", pong)
 
-asyncio.run(verify_ws("ws://127.0.0.1:8766"))
+asyncio.run(verify_ws("ws://127.0.0.1:8000"))
 ```
 
 TCP verification:
@@ -100,6 +100,12 @@ flow for a client connection. `status` is returned only by the status port.
 | server -> client | pong   | Response to `ping` |
 | status port -> client | status | One-shot connection count |
 
+`result` payloads include `text`, `token_ids`, `confidence_scores`, `is_final`,
+`last_state`, and `turn_detection`. `confidence_scores` align with the newly emitted
+`token_ids`.
+`turn_detection` reports `start_of_utterance`, `running`, `pause`, or
+`end_of_utterance`, while `last_state` reports `speech`, `silence`, or `null`.
+
 ## Audio messages
 
 An `audio` message can carry either base64 bytes or a list of float samples. Base64 is
@@ -134,14 +140,11 @@ If the server is started with `--status-port`, you can open a plain TCP connecti
 that port and read a single JSON line that reports the current number of connected
 streams. The server closes the connection immediately after sending the response.
 
-## Finalization behavior (current vs. upcoming)
+## Finalization behavior
 
 Today, the client is responsible for ending the stream by sending either `final: true`
 on the last audio message or a separate `close` message. The server will then return a
 `result` with `is_final: true`.
-
-In a future release, the server will assert and emit `is_final` automatically based on
-silence detection instead of relying on the client to decide when to end the stream.
 
 ## Debugging and common errors
 

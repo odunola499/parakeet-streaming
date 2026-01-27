@@ -4,7 +4,7 @@ This is an end-to-end microphone demo example for the streaming server. The
 server should already be running with WebSockets enabled, for example:
 
 ```bash
-parakeet-server serve --host 0.0.0.0 --port 8765 --ws-port 8766 --device cuda
+parakeet-server serve --host 0.0.0.0 --port 8765 --ws-port 8000 --device cuda
 ```
 
 Install dependencies:
@@ -25,7 +25,7 @@ import numpy as np
 import sounddevice as sd
 import websockets
 
-HOST, PORT = "127.0.0.1", 8766
+HOST, PORT = "127.0.0.1", 8000
 SAMPLE_RATE = 16000
 CHUNK_SECONDS = 0.25
 

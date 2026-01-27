@@ -1,6 +1,6 @@
 from collections import deque
 import threading
-from typing import Dict
+from typing import Any, Dict
 
 import numpy as np
 import torch
@@ -47,8 +47,15 @@ class ASREngine:
             seq = self.streams.get(stream_id)
         if seq is None:
             return
+        notify_td = False
         with seq.lock:
             seq.push_samples(samples, final=final)
+            if samples.size and not seq.td_queued:
+                seq.td_queued = True
+                notify_td = True
+        self.runner.queue_pre_encode(seq)
+        if notify_td:
+            self.runner.queue_turn_detection(seq)
 
     def get_update_seq(self) -> int:
         return self.runner.get_update_seq()
@@ -66,11 +73,16 @@ class ASREngine:
             with seq.lock:
                 text = self.tokenizer.decode(list(seq.token_ids))
                 is_final = seq.is_finished
+                last_state = seq.last_state
+                turn_detection = seq.turn_position
             stream_result = StreamResult(
                 stream_id=item.seq_id,
                 text=text,
                 token_ids=item.token_ids,
                 is_final=is_final,
+                confidence_scores=item.confidence_scores,
+                last_state=last_state,
+                turn_detection=turn_detection,
             )
             self._stream_results.setdefault(item.seq_id, deque()).append(stream_result)
             if is_final:
@@ -99,3 +111,48 @@ class ASREngine:
     def drop_stream_results(self, stream_id: int) -> None:
         with self._result_lock:
             self._stream_results.pop(stream_id, None)
+
+    def get_metrics(self) -> dict[str, Any]:
+        with self._stream_lock:
+            streams = list(self.streams.values())
+        connected = len(streams)
+        raw_queue_depth = 0
+        encoded_queue_depth = 0
+        td_queue_depth = 0
+        raw_queue_streams = 0
+        encoded_queue_streams = 0
+        td_queue_streams = 0
+        in_flight = 0
+
+        for seq in streams:
+            with seq.lock:
+                raw_len = len(seq.raw_queue)
+                enc_len = len(seq.encoded_queue)
+                td_len = seq.td_queue.qsize()
+                if raw_len:
+                    raw_queue_streams += 1
+                if enc_len:
+                    encoded_queue_streams += 1
+                if td_len:
+                    td_queue_streams += 1
+                raw_queue_depth += raw_len
+                encoded_queue_depth += enc_len
+                td_queue_depth += td_len
+                in_flight += seq.in_flight
+
+        runner_metrics = self.runner.get_metrics()
+        runner_metrics.update(
+            {
+                "connected_streams": connected,
+                "queues": {
+                    "raw_depth": raw_queue_depth,
+                    "encoded_depth": encoded_queue_depth,
+                    "turn_detection_depth": td_queue_depth,
+                    "raw_streams": raw_queue_streams,
+                    "encoded_streams": encoded_queue_streams,
+                    "turn_detection_streams": td_queue_streams,
+                },
+                "in_flight": in_flight,
+            }
+        )
+        return runner_metrics

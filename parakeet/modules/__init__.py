@@ -1,5 +1,10 @@
 from parakeet.modules.attention import ConformerAttention, PositionalEncoding
-from parakeet.modules.cache import ModelCache, StreamingState
+from parakeet.modules.cache import (
+    ModelCache,
+    PagedBatchCache,
+    PagedModelCache,
+    StreamingState,
+)
 from parakeet.modules.convolution import (
     CausalConv1d,
     CausalConv2D,
@@ -21,6 +26,8 @@ __all__ = [
     "ConformerConvolution",
     "ConformerFeedForward",
     "ModelCache",
+    "PagedModelCache",
+    "PagedBatchCache",
     "StreamingState",
     "ConvSubsampling",
     "FeatureExtractor",

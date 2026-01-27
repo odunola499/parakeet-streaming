@@ -3,6 +3,7 @@
 Low-latency, real-time streaming Automatic Speech Recognition (ASR) inference service
 built around NVIDIA's streaming speech models. This project is still actively
 worked on, so bugs and breaking changes are possible.
+Read more about the project [here!!](https://odunola.bearblog.dev/parakeet-streaming/)
 
 ## Models
 
@@ -41,7 +42,7 @@ The first run will download model weights from Hugging Face.
 ## Run the server
 
 ```bash
-parakeet-server serve --host 0.0.0.0 --port 8765 --ws-port 8766 --device cuda
+parakeet-server serve --host 0.0.0.0 --port 8765 --ws-port 8000 --device cuda
 ```
 
 Common flags include `--model-size`, `--sample-rate`, `--max-num-streams`,
@@ -59,11 +60,13 @@ Audio messages look like this:
 ```
 
 Only `pcm16` and `f32` encodings are supported. The server responds with `result`
-messages that include `text`, `token_ids`, and `is_final`.
+messages that include `text`, `token_ids`, `confidence_scores`, `is_final`,
+`last_state`, and `turn_detection`. `confidence_scores` are aligned with `token_ids`
+for the newly emitted tokens.
+`turn_detection` reports `start_of_utterance`, `running`, `pause`, or
+`end_of_utterance`, while `last_state` reports `speech`, `silence`, or `null`.
 
-There is no VAD integration yet, so silence is not handled automatically. Today, the
-client ends a stream by sending `final: true` or `close`, or closing the connection. In a future release, the
-server will assert `final` based on silence detection instead of requiring the
-client to decide when a stream is finished.
-Please refer to the ```docs``` folder for more information on how to get started,
-including Python and TS client quickstarts)
+Turn detection metadata is included in `result` payloads, but streams still require
+client finalization by sending `final: true` or `close`, or closing the connection.
+Please refer to the `docs` folder for more information on how to get started,
+including Python and TS client quickstarts.

@@ -4,6 +4,7 @@ import torch
 from torch import Tensor, nn
 
 from parakeet.modules.cache import ModelCache
+from parakeet.kernels.paged_attention import paged_attention_triton
 
 
 def sdpa_attention_forward(
@@ -94,7 +95,13 @@ class ConformerAttention(nn.Module):
         qkv = self.qkv(x)
         query, key, value = qkv.chunk(3, dim=-1)
 
-        if cache is not None:
+        if cache is not None and getattr(cache, "is_paged", False):
+            if not key.is_contiguous():
+                key = key.contiguous()
+            if not value.is_contiguous():
+                value = value.contiguous()
+            attn_start = cache.update_attn_cache(self.layer_idx, key, value)
+        elif cache is not None:
             key, value = cache.update_attn_cache(self.layer_idx, key, value)
         query = query.view(B, -1, self.num_heads, self.d_k)
         key = key.view(B, -1, self.num_heads, self.d_k).transpose(1, 2)
@@ -110,14 +117,44 @@ class ConformerAttention(nn.Module):
 
         matrix_bd = torch.matmul(q_with_bias_v, pos.transpose(-2, -1))
         matrix_bd = self.rel_shift(matrix_bd)
-        matrix_bd = matrix_bd[:, :, :, : key.size(-2)] * (1 / self.s_d_k)
+        if cache is not None and getattr(cache, "is_paged", False):
+            key_len = attn_mask.size(-1)
+        else:
+            key_len = key.size(-2)
+        matrix_bd = matrix_bd[:, :, :, :key_len] * (1 / self.s_d_k)
 
-        matrix_bd = matrix_bd.masked_fill(attn_mask, -1e5)
+        mask_value = torch.finfo(matrix_bd.dtype).min
+        matrix_bd = matrix_bd.masked_fill(attn_mask, mask_value)
 
         # print(f"matrix_bd: {matrix_bd.shape},q_with_bias_u {q_with_bias_u.shape}, key {key.shape}, value {value.shape}")
-        output = sdpa_attention_forward(
-            query=q_with_bias_u, key=key, value=value, attention_mask=matrix_bd
-        )
+        if cache is not None and getattr(cache, "is_paged", False):
+            q_for_kernel = q_with_bias_u.transpose(1, 2).contiguous()
+            bias = matrix_bd.contiguous()
+            out, stats = paged_attention_triton(
+                q_for_kernel,
+                cache.pool.attn_k_pages,
+                cache.pool.attn_v_pages,
+                cache.slot_pages,
+                attn_start,
+                bias,
+                self.layer_idx,
+                1.0 / self.s_d_k,
+            )
+            if stats.used_triton:
+                output = out.transpose(1, 2)
+            else:
+                attn_k, attn_v = cache.pool.gather_kv(cache.slot_index)
+                key = attn_k[:, self.layer_idx]
+                value = attn_v[:, self.layer_idx]
+                key = key.view(B, -1, self.num_heads, self.d_k).transpose(1, 2)
+                value = value.view(B, -1, self.num_heads, self.d_k).transpose(1, 2)
+                output = sdpa_attention_forward(
+                    query=q_with_bias_u, key=key, value=value, attention_mask=matrix_bd
+                )
+        else:
+            output = sdpa_attention_forward(
+                query=q_with_bias_u, key=key, value=value, attention_mask=matrix_bd
+            )
 
         output = output.reshape(B, -1, self.num_heads * self.d_k)
         output = self.linear_out(output)

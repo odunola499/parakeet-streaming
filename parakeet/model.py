@@ -105,12 +105,12 @@ class Parakeet(nn.Module, GenerationMixin):
         raise NotImplementedError
 
     @classmethod
-    def from_pretrained(cls, size: Literal["small", "large"] | ModelConfig = "small"):
-        if isinstance(size, ModelConfig):
-            config = size
-            size = "large" if isinstance(config, LargeModelConfig) else "small"
-        else:
-            config = CONFIG_MAP[size]()
+    def from_pretrained(
+        cls,
+        size: Literal["small", "large"] = "small",
+        dtype: torch.dtype | None = None,
+    ):
+        config = CONFIG_MAP[size]()
 
         repo_id = WEIGHTS_MAP[size]
         model_path = hf_hub_download(repo_id=repo_id, filename="model.safetensors")
@@ -124,6 +124,8 @@ class Parakeet(nn.Module, GenerationMixin):
         model = cls(config)
         state_dict = remap_weights(state_dict)
         model.load_state_dict(state_dict)
+        if dtype is not None:
+            model = model.to(dtype=dtype)
         model._feature_extractor = FeatureExtractor()
         model._tokenizer = Tokenizer(tokenizer_path)
 

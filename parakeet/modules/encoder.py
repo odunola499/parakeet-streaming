@@ -5,7 +5,7 @@ from parakeet.modules.attention import ConformerAttention, PositionalEncoding
 from parakeet.modules.convolution import ConformerConvolution
 from parakeet.modules.feedforward import ConformerFeedForward
 from parakeet.modules.subsample import ConvSubsampling
-from parakeet.modules.cache import ModelCache, StreamingState
+from parakeet.modules.cache import ModelCache, PagedModelCache, StreamingState
 
 
 class ConformerLayer(nn.Module):
@@ -142,20 +142,36 @@ class ConformerEncoder(nn.Module):
         batch_size: int = 1,
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
+        paged_kv_cache: bool = False,
+        paged_kv_page_size: int = 16,
+        paged_kv_max_pages: int | None = None,
     ):
         if device is None:
             device = next(self.parameters()).device
         if dtype is None:
             dtype = next(self.parameters()).dtype
-        cache = ModelCache(
-            num_layers=len(self.layers),
-            attn_context_size=self.att_context_size,
-            embed_dim=self.embed_dim,
-            conv_kernel_size=self.conv_kernel_size,
-            batch_size=batch_size,
-            device=device,
-            dtype=dtype,
-        )
+        if paged_kv_cache:
+            cache = PagedModelCache(
+                num_layers=len(self.layers),
+                attn_context_size=self.att_context_size,
+                embed_dim=self.embed_dim,
+                conv_kernel_size=self.conv_kernel_size,
+                batch_size=batch_size,
+                page_size=paged_kv_page_size,
+                max_pages=paged_kv_max_pages,
+                device=device,
+                dtype=dtype,
+            )
+        else:
+            cache = ModelCache(
+                num_layers=len(self.layers),
+                attn_context_size=self.att_context_size,
+                embed_dim=self.embed_dim,
+                conv_kernel_size=self.conv_kernel_size,
+                batch_size=batch_size,
+                device=device,
+                dtype=dtype,
+            )
         processed_frames = torch.zeros(batch_size, dtype=torch.int64, device=device)
         cache_lengths = torch.zeros(batch_size, dtype=torch.int64, device=device)
         return StreamingState(
@@ -251,6 +267,37 @@ class ConformerEncoder(nn.Module):
                 pos_emb=pos_emb,
                 pad_mask=pad_mask,
                 attn_mask=att_mask,
+                cache=state.cache,
+            )
+
+        if isinstance(length, Tensor):
+            state.processed_frames.add_(length)
+            state.cache_lengths.add_(length)
+            state.cache_lengths.clamp_(max=self.att_context_size[0])
+        else:
+            state.processed_frames += x.size(1)
+            state.cache_lengths = min(
+                int(state.cache_lengths) + x.size(1), self.att_context_size[0]
+            )
+        x = x.transpose(1, 2)
+        return x, state
+
+    def forward_with_masks(
+        self,
+        x: Tensor,
+        state: StreamingState,
+        pad_mask: Tensor,
+        attn_mask: Tensor,
+        length: Tensor | None = None,
+    ):
+        x, pos_emb = self.pos_enc(x, cache_len=self.att_context_size[0])
+
+        for layer in self.layers:
+            x = layer(
+                x,
+                pos_emb=pos_emb,
+                pad_mask=pad_mask,
+                attn_mask=attn_mask,
                 cache=state.cache,
             )
 
