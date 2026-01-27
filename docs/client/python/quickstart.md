@@ -82,8 +82,8 @@ async def main():
 asyncio.run(main())
 ```
 
-Result messages also include `token_ids` and `confidence_scores`, aligned to the
-newly emitted tokens.
+Result messages also include `token_ids`, `confidence_scores`, `last_state`, and
+`turn_detection`. `confidence_scores` align with the newly emitted tokens.
 
 ## Scenario 2: Raw TCP smoke test (send silence, then finalize)
 

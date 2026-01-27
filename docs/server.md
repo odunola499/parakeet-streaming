@@ -85,7 +85,7 @@ If you enable `--status-port`, you can connect to that port and read a single JS
 like this:
 
 ```json
-{"type":"status","connected_streams":3}
+{"type":"status","connected_streams":3,"queues":{"raw_depth":2,"encoded_depth":1,"turn_detection_depth":0,"raw_streams":1,"encoded_streams":1,"turn_detection_streams":0},"in_flight":2,"scheduler":{"active":3,"waiting":0},"timings_ms":{"turn_detection_avg":1.2,"pre_encode_avg":0.8,"encode_avg":1.5,"decode_avg":2.1},"rates_per_sec":{"turn_detection_sequences":120.0,"pre_encode_chunks":120.0,"encode_frames":2400.0,"decode_frames":2400.0,"decode_tokens":350.0},"counts":{"turn_detection_calls":120,"pre_encode_calls":120,"encode_calls":120,"decode_calls":120},"uptime_sec":42.0}
 ```
 
 The connection closes immediately after that response. This endpoint is intended for

@@ -4,6 +4,8 @@ import threading
 
 import numpy as np
 import torch
+import time
+from torch.profiler import record_function
 
 from parakeet.config import Config
 from parakeet.engine.scheduler import Scheduler
@@ -17,6 +19,24 @@ class DecodeResult:
     seq_id: int
     token_ids: list[int]
     confidence_scores: list[float]
+
+
+@dataclass
+class RunnerMetrics:
+    start_time: float
+    td_time: float = 0.0
+    td_calls: int = 0
+    td_sequences: int = 0
+    pre_encode_time: float = 0.0
+    pre_encode_calls: int = 0
+    pre_encode_chunks: int = 0
+    encode_time: float = 0.0
+    encode_calls: int = 0
+    encode_frames: int = 0
+    decode_time: float = 0.0
+    decode_calls: int = 0
+    decode_frames: int = 0
+    decode_tokens: int = 0
 
 
 class ModelRunner:
@@ -39,8 +59,17 @@ class ModelRunner:
         self._td_ready_queue: queue.SimpleQueue[Sequence] = queue.SimpleQueue()
         self._update_cond = threading.Condition()
         self._update_seq = 0
+        self._metrics = RunnerMetrics(start_time=time.monotonic())
+        self._metrics_lock = threading.Lock()
 
     def _init_model(self) -> None:
+        if self.device.type == "cuda":
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            try:
+                torch.set_float32_matmul_precision("high")
+            except AttributeError:
+                pass
         self.model = Parakeet.from_pretrained(self.config.size).to(self.device)
         self.model.eval()
         self.turn_detection = TurnDetection()
@@ -106,8 +135,6 @@ class ModelRunner:
         self.scheduler.add(seq)
 
     def step(self) -> list[DecodeResult]:
-        self.scheduler.admit_ready()
-        self._pre_encode_step()
         self._encode_step()
         return self._decode_step()
 
@@ -116,9 +143,6 @@ class ModelRunner:
             return
         self._stop_event.clear()
         self._threads = [
-            threading.Thread(
-                target=self._pre_encode_loop, args=(interval,), daemon=True
-            ),
             threading.Thread(target=self._encode_loop, args=(interval,), daemon=True),
             threading.Thread(target=self._decode_loop, args=(interval,), daemon=True),
             threading.Thread(
@@ -156,18 +180,57 @@ class ModelRunner:
             self._update_cond.wait(timeout=timeout)
             return self._update_seq
 
+    def get_metrics(self) -> dict[str, float | int | dict[str, float | int]]:
+        with self._metrics_lock:
+            metrics = RunnerMetrics(**vars(self._metrics))
+        uptime = max(1e-6, time.monotonic() - metrics.start_time)
+        scheduler_counts = self.scheduler.counts()
+        return {
+            "uptime_sec": uptime,
+            "scheduler": scheduler_counts,
+            "timings_ms": {
+                "turn_detection_avg": (
+                    (metrics.td_time / metrics.td_calls) * 1000.0
+                    if metrics.td_calls
+                    else 0.0
+                ),
+                "pre_encode_avg": (
+                    (metrics.pre_encode_time / metrics.pre_encode_calls) * 1000.0
+                    if metrics.pre_encode_calls
+                    else 0.0
+                ),
+                "encode_avg": (
+                    (metrics.encode_time / metrics.encode_calls) * 1000.0
+                    if metrics.encode_calls
+                    else 0.0
+                ),
+                "decode_avg": (
+                    (metrics.decode_time / metrics.decode_calls) * 1000.0
+                    if metrics.decode_calls
+                    else 0.0
+                ),
+            },
+            "rates_per_sec": {
+                "turn_detection_sequences": metrics.td_sequences / uptime,
+                "pre_encode_chunks": metrics.pre_encode_chunks / uptime,
+                "encode_frames": metrics.encode_frames / uptime,
+                "decode_frames": metrics.decode_frames / uptime,
+                "decode_tokens": metrics.decode_tokens / uptime,
+            },
+            "counts": {
+                "turn_detection_calls": metrics.td_calls,
+                "pre_encode_calls": metrics.pre_encode_calls,
+                "encode_calls": metrics.encode_calls,
+                "decode_calls": metrics.decode_calls,
+            },
+        }
+
     def queue_turn_detection(self, seq: Sequence) -> None:
         self._td_ready_queue.put(seq)
 
     def _turn_detection_loop(self, interval: float) -> None:
         while not self._stop_event.is_set():
             self._turn_detection_step()
-            self._stop_event.wait(interval)
-
-    def _pre_encode_loop(self, interval: float) -> None:
-        while not self._stop_event.is_set():
-            self.scheduler.admit_ready()
-            self._pre_encode_step()
             self._stop_event.wait(interval)
 
     def _encode_loop(self, interval: float) -> None:
@@ -188,6 +251,11 @@ class ModelRunner:
             self._stop_event.wait(interval)
 
     def _turn_detection_step(self) -> None:
+        start = time.perf_counter()
+        with record_function("turn_detection_step"):
+            self._turn_detection_step_inner(start)
+
+    def _turn_detection_step_inner(self, start: float) -> None:
         ready_seqs: list[Sequence] = []
         while True:
             try:
@@ -238,160 +306,266 @@ class ModelRunner:
         if turn_updates:
             self._notify_update()
 
-    def _pre_encode_step(self) -> None:
-        for seq in self.scheduler.active_sequences():
-            if seq.status == SequenceStatus.FINISHED:
-                continue
-            if seq.has_pending_audio():
-                self._run_pre_encode(seq)
+        elapsed = time.perf_counter() - start
+        if seq_chunks:
+            with self._metrics_lock:
+                self._metrics.td_time += elapsed
+                self._metrics.td_calls += 1
+                self._metrics.td_sequences += len(seq_chunks)
 
-    def _run_pre_encode(self, seq: Sequence) -> None:
+    def _batch_pre_encode(self, active_seqs: list[Sequence]) -> None:
         while True:
-            with seq.lock:
-                if seq.enc_buffer is None:
-                    return
-                if not seq.raw_queue:
-                    return
-                samples, is_final = seq.raw_queue.popleft()
-                pre_encode_cache = seq.pre_encode_cache
-                drop_extra_pre_encoded = seq.drop_extra_pre_encoded
-                pre_encode_cache_size = seq.pre_encode_cache_size
-
-            feats = self._feature_extractor.push(samples, seq, final=is_final)
-            if feats is None:
-                continue
-            feats = feats.to(self.device)
-
-            if pre_encode_cache is None:
-                feats_in = feats
-                has_cache = False
-            else:
-                cache_len = pre_encode_cache.size(-1)
-                feat_len = feats.size(-1)
-                feats_in = torch.empty(
-                    feats.size(0),
-                    feats.size(1),
-                    cache_len + feat_len,
-                    device=feats.device,
-                    dtype=feats.dtype,
+            items: list[tuple[Sequence, np.ndarray, bool]] = []
+            meta: list[tuple[Sequence, torch.Tensor | None, int, int]] = []
+            for seq in active_seqs:
+                with seq.lock:
+                    if seq.status == SequenceStatus.FINISHED:
+                        continue
+                    if not seq.raw_queue:
+                        continue
+                    samples, is_final = seq.raw_queue.popleft()
+                    pre_encode_cache = seq.pre_encode_cache
+                    pre_encode_cache_size = seq.pre_encode_cache_size
+                    drop_extra_pre_encoded = seq.drop_extra_pre_encoded
+                items.append((seq, samples, is_final))
+                meta.append(
+                    (
+                        seq,
+                        pre_encode_cache,
+                        pre_encode_cache_size,
+                        drop_extra_pre_encoded,
+                    )
                 )
-                feats_in[..., :cache_len].copy_(pre_encode_cache)
-                feats_in[..., cache_len:].copy_(feats)
-                has_cache = True
 
-            lengths = torch.full(
-                (feats_in.size(0),),
-                feats_in.size(-1),
-                dtype=torch.int64,
-                device=self.device,
-            )
-            pre_encoded, _ = self.pre_encoder(feats_in.transpose(1, 2), lengths)
-            if has_cache and drop_extra_pre_encoded > 0:
-                pre_encoded = pre_encoded[:, drop_extra_pre_encoded:, :]
+            if not items:
+                return
 
-            with seq.lock:
-                if seq.enc_buffer is None:
-                    return
-                if pre_encode_cache_size > 0:
-                    if feats_in.size(-1) >= pre_encode_cache_size:
-                        seq.pre_encode_cache = feats_in[
-                            :, :, -pre_encode_cache_size:
-                        ].detach()
+            start = time.perf_counter()
+            with record_function("pre_encode_step"), torch.inference_mode():
+                feats_list = self._feature_extractor.batch_push(
+                    items, device=self.device
+                )
+
+                feats_in_list: list[torch.Tensor] = []
+                feats_meta: list[tuple[Sequence, torch.Tensor, bool, int, int]] = []
+                for (
+                    (seq, _, _),
+                    (
+                        _,
+                        pre_encode_cache,
+                        pre_encode_cache_size,
+                        drop_extra_pre_encoded,
+                    ),
+                    feats,
+                ) in zip(items, meta, feats_list):
+                    if feats is None:
+                        continue
+                    if pre_encode_cache is None:
+                        feats_in = feats
+                        has_cache = False
                     else:
-                        seq.pre_encode_cache = feats_in.detach()
-                if pre_encoded is not None and pre_encoded.numel() > 0:
-                    if seq.enc_buffer.numel() == 0:
-                        seq.enc_buffer = pre_encoded
-                    else:
-                        old_len = seq.enc_buffer.size(1)
-                        new_len = pre_encoded.size(1)
-                        new_buffer = torch.empty(
-                            (
-                                seq.enc_buffer.size(0),
-                                old_len + new_len,
-                                pre_encoded.size(2),
-                            ),
-                            device=pre_encoded.device,
-                            dtype=pre_encoded.dtype,
+                        cache_len = pre_encode_cache.size(-1)
+                        feat_len = feats.size(-1)
+                        feats_in = torch.empty(
+                            feats.size(0),
+                            feats.size(1),
+                            cache_len + feat_len,
+                            device=feats.device,
+                            dtype=feats.dtype,
                         )
-                        new_buffer[:, :old_len, :].copy_(seq.enc_buffer)
-                        new_buffer[:, old_len:, :].copy_(pre_encoded)
-                        seq.enc_buffer = new_buffer
+                        feats_in[..., :cache_len].copy_(pre_encode_cache)
+                        feats_in[..., cache_len:].copy_(feats)
+                        has_cache = True
+                    feats_in_list.append(feats_in)
+                    feats_meta.append(
+                        (
+                            seq,
+                            feats_in,
+                            has_cache,
+                            pre_encode_cache_size,
+                            drop_extra_pre_encoded,
+                        )
+                    )
+
+                if not feats_in_list:
+                    elapsed = time.perf_counter() - start
+                    with self._metrics_lock:
+                        self._metrics.pre_encode_time += elapsed
+                        self._metrics.pre_encode_calls += 1
+                        self._metrics.pre_encode_chunks += len(items)
+                    continue
+
+                max_len = max(feats_in.size(-1) for feats_in in feats_in_list)
+                batch_size = len(feats_in_list)
+                feat_dim = feats_in_list[0].size(1)
+                batch_feats = torch.zeros(
+                    (batch_size, feat_dim, max_len),
+                    device=self.device,
+                    dtype=feats_in_list[0].dtype,
+                )
+                lengths = []
+                for idx, feats_in in enumerate(feats_in_list):
+                    length = feats_in.size(-1)
+                    batch_feats[idx : idx + 1, :, :length].copy_(feats_in)
+                    lengths.append(length)
+                length_tensor = torch.tensor(
+                    lengths, device=self.device, dtype=torch.int64
+                )
+                pre_encoded, out_lengths = self.pre_encoder(
+                    batch_feats.transpose(1, 2), length_tensor
+                )
+
+            for idx, (
+                seq,
+                feats_in,
+                has_cache,
+                pre_encode_cache_size,
+                drop_extra_pre_encoded,
+            ) in enumerate(feats_meta):
+                out_len = int(out_lengths[idx].item())
+                if out_len <= 0:
+                    continue
+                out = pre_encoded[idx : idx + 1, :out_len, :]
+                if has_cache and drop_extra_pre_encoded > 0:
+                    if out.size(1) <= drop_extra_pre_encoded:
+                        continue
+                    out = out[:, drop_extra_pre_encoded:, :]
+                with seq.lock:
+                    if seq.enc_buffer is None:
+                        continue
+                    if pre_encode_cache_size > 0:
+                        if feats_in.size(-1) >= pre_encode_cache_size:
+                            seq.pre_encode_cache = feats_in[
+                                :, :, -pre_encode_cache_size:
+                            ].detach()
+                        else:
+                            seq.pre_encode_cache = feats_in.detach()
+                    if out.numel() > 0:
+                        if seq.enc_buffer.numel() == 0:
+                            seq.enc_buffer = out
+                        else:
+                            old_len = seq.enc_buffer.size(1)
+                            new_len = out.size(1)
+                            new_buffer = torch.empty(
+                                (
+                                    seq.enc_buffer.size(0),
+                                    old_len + new_len,
+                                    out.size(2),
+                                ),
+                                device=out.device,
+                                dtype=out.dtype,
+                            )
+                            new_buffer[:, :old_len, :].copy_(seq.enc_buffer)
+                            new_buffer[:, old_len:, :].copy_(out)
+                            seq.enc_buffer = new_buffer
+
+            elapsed = time.perf_counter() - start
+            with self._metrics_lock:
+                self._metrics.pre_encode_time += elapsed
+                self._metrics.pre_encode_calls += 1
+                self._metrics.pre_encode_chunks += len(items)
 
     def _encode_step(self) -> None:
-        chunks = []
-        lengths = []
-        active_seqs: list[Sequence] = []
-        for seq in self.scheduler.active_sequences():
-            with seq.lock:
-                if seq.status == SequenceStatus.FINISHED:
-                    continue
-                if not seq.has_chunk_ready():
-                    continue
-                chunk, length = seq.pop_chunk()
-                if chunk is None:
-                    continue
-                seq.in_flight += 1
-            chunks.append(chunk)
-            lengths.append(int(length.item()))
-            active_seqs.append(seq)
+        self.scheduler.admit_ready()
+        active_seqs = self.scheduler.active_sequences()
+        self._batch_pre_encode(active_seqs)
 
-        if not chunks:
-            return
+        start = time.perf_counter()
+        with record_function("encode_step"):
+            chunks = []
+            lengths = []
+            encode_seqs: list[Sequence] = []
+            for seq in active_seqs:
+                with seq.lock:
+                    if seq.status == SequenceStatus.FINISHED:
+                        continue
+                    if not seq.has_chunk_ready():
+                        continue
+                    chunk, length = seq.pop_chunk()
+                    if chunk is None:
+                        continue
+                    seq.in_flight += 1
+                chunks.append(chunk)
+                lengths.append(int(length.item()))
+                encode_seqs.append(seq)
 
-        max_len = max(lengths)
-        batch_size = len(chunks)
-        hidden = chunks[0].size(2)
-        batch = torch.zeros(
-            (batch_size, max_len, hidden),
-            device=chunks[0].device,
-            dtype=chunks[0].dtype,
-        )
-        for idx, (chunk, length) in enumerate(zip(chunks, lengths)):
-            batch[idx : idx + 1, :length, :].copy_(chunk)
-        length_tensor = torch.tensor(lengths, device=self.device, dtype=torch.int64)
-        batch_state, slot_index = self.scheduler.pack_states(active_seqs)
+            if not chunks:
+                return
 
-        with torch.inference_mode():
-            chunk_out, batch_state = self.encoder(
-                batch,
-                batch_state,
-                length=length_tensor,
-                bypass_pre_encode=True,
+            max_len = max(lengths)
+            batch_size = len(chunks)
+            hidden = chunks[0].size(2)
+            batch = torch.zeros(
+                (batch_size, max_len, hidden),
+                device=chunks[0].device,
+                dtype=chunks[0].dtype,
             )
+            for idx, (chunk, length) in enumerate(zip(chunks, lengths)):
+                batch[idx : idx + 1, :length, :].copy_(chunk)
+            length_tensor = torch.tensor(lengths, device=self.device, dtype=torch.int64)
+            batch_state, slot_index = self.scheduler.pack_states(encode_seqs)
 
-        for idx, seq in enumerate(active_seqs):
-            out = chunk_out[idx : idx + 1, :, : lengths[idx]]
-            with seq.lock:
-                seq.enqueue_encoded(out)
+            with torch.inference_mode():
+                chunk_out, batch_state = self.encoder(
+                    batch,
+                    batch_state,
+                    length=length_tensor,
+                    bypass_pre_encode=True,
+                )
 
-        self.scheduler.unpack_states(batch_state, slot_index)
-        for seq in active_seqs:
-            with seq.lock:
-                seq.in_flight = max(0, seq.in_flight - 1)
+            for idx, seq in enumerate(encode_seqs):
+                out = chunk_out[idx : idx + 1, :, : lengths[idx]]
+                with seq.lock:
+                    seq.enqueue_encoded(out)
+
+            self.scheduler.unpack_states(batch_state, slot_index)
+            for seq in encode_seqs:
+                with seq.lock:
+                    seq.in_flight = max(0, seq.in_flight - 1)
+
+            elapsed = time.perf_counter() - start
+            with self._metrics_lock:
+                self._metrics.encode_time += elapsed
+                self._metrics.encode_calls += 1
+                self._metrics.encode_frames += sum(lengths)
 
     def _decode_step(self) -> list[DecodeResult]:
-        results: list[DecodeResult] = []
-        batch_seqs: list[Sequence] = []
-        batch_chunks: list[torch.Tensor] = []
-        for seq in self.scheduler.active_sequences():
-            if seq.has_encoded():
-                chunk = seq.pop_encoded()
-                if chunk is not None:
-                    batch_seqs.append(seq)
-                    batch_chunks.append(chunk)
+        start = time.perf_counter()
+        with record_function("decode_step"):
+            frames = 0
+            results: list[DecodeResult] = []
+            batch_seqs: list[Sequence] = []
+            batch_chunks: list[torch.Tensor] = []
+            for seq in self.scheduler.active_sequences():
+                if seq.has_encoded():
+                    chunk = seq.pop_encoded()
+                    if chunk is not None:
+                        batch_seqs.append(seq)
+                        batch_chunks.append(chunk)
+                        frames += int(chunk.size(2))
 
-        if batch_seqs:
-            token_lists, confidence_scores = self._decode_batch(
-                batch_seqs, batch_chunks
-            )
-            for seq, tokens, scores in zip(batch_seqs, token_lists, confidence_scores):
-                if tokens:
-                    with seq.lock:
-                        seq.append_tokens(tokens, scores)
-                    results.append(DecodeResult(seq.request_id, tokens, scores))
+            if batch_seqs:
+                token_lists, confidence_scores = self._decode_batch(
+                    batch_seqs, batch_chunks
+                )
+                for seq, tokens, scores in zip(
+                    batch_seqs, token_lists, confidence_scores
+                ):
+                    if tokens:
+                        with seq.lock:
+                            seq.append_tokens(tokens, scores)
+                        results.append(DecodeResult(seq.request_id, tokens, scores))
 
-        return results
+            if batch_seqs:
+                total_tokens = sum(len(tokens) for tokens in token_lists)
+                elapsed = time.perf_counter() - start
+                with self._metrics_lock:
+                    self._metrics.decode_time += elapsed
+                    self._metrics.decode_calls += 1
+                    self._metrics.decode_frames += frames
+                    self._metrics.decode_tokens += total_tokens
+
+            return results
 
     def _finalize_sequences(self, result_ids: set[int]) -> bool:
         finalized = False
@@ -499,20 +673,24 @@ class ModelRunner:
         for _ in range(self._max_symbols_per_frame):
             logits = self.joiner(frame_batch, pred_out_batch)
             ids = logits.argmax(-1)
+            blank_mask = ids == self.blank_id
+            if blank_mask.all().item():
+                break
+
             log_probs = torch.log_softmax(logits, dim=-1)
             token_logp = log_probs.gather(-1, ids.unsqueeze(1)).squeeze(-1)
             token_conf = token_logp.exp()
 
-            blank_mask = ids == self.blank_id
-            if bool(blank_mask.all()):
-                break
-
-            for idx, (token_id, conf) in enumerate(
-                zip(ids.tolist(), token_conf.tolist())
-            ):
-                if token_id != self.blank_id:
-                    token_lists[idx].append(token_id)
-                    token_confs[idx].append(conf)
+            non_blank_idx = (~blank_mask).nonzero(as_tuple=False).flatten()
+            if non_blank_idx.numel() > 0:
+                ids_nb = ids.index_select(0, non_blank_idx).detach().cpu().tolist()
+                conf_nb = (
+                    token_conf.index_select(0, non_blank_idx).detach().cpu().tolist()
+                )
+                rows = non_blank_idx.detach().cpu().tolist()
+                for row, token_id, conf in zip(rows, ids_nb, conf_nb):
+                    token_lists[row].append(token_id)
+                    token_confs[row].append(conf)
 
             new_pred_out, new_state = self.decoder(ids, state=state_batch)
             pred_out_batch = torch.where(

@@ -60,8 +60,8 @@ When you stop recording, send a final marker so the server can finalize the stre
 ws.send(JSON.stringify({ type: "audio", data: "", encoding: "pcm16", final: true }));
 ```
 
-Result messages also include `token_ids` and `confidence_scores`, aligned to the
-newly emitted tokens.
+Result messages also include `token_ids`, `confidence_scores`, `last_state`, and
+`turn_detection`. `confidence_scores` align with the newly emitted tokens.
 
 ## Scenario 2: Node raw TCP smoke test
 

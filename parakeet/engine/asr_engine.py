@@ -1,6 +1,6 @@
 from collections import deque
 import threading
-from typing import Dict
+from typing import Any, Dict
 
 import numpy as np
 import torch
@@ -110,3 +110,48 @@ class ASREngine:
     def drop_stream_results(self, stream_id: int) -> None:
         with self._result_lock:
             self._stream_results.pop(stream_id, None)
+
+    def get_metrics(self) -> dict[str, Any]:
+        with self._stream_lock:
+            streams = list(self.streams.values())
+        connected = len(streams)
+        raw_queue_depth = 0
+        encoded_queue_depth = 0
+        td_queue_depth = 0
+        raw_queue_streams = 0
+        encoded_queue_streams = 0
+        td_queue_streams = 0
+        in_flight = 0
+
+        for seq in streams:
+            with seq.lock:
+                raw_len = len(seq.raw_queue)
+                enc_len = len(seq.encoded_queue)
+                td_len = seq.td_queue.qsize()
+                if raw_len:
+                    raw_queue_streams += 1
+                if enc_len:
+                    encoded_queue_streams += 1
+                if td_len:
+                    td_queue_streams += 1
+                raw_queue_depth += raw_len
+                encoded_queue_depth += enc_len
+                td_queue_depth += td_len
+                in_flight += seq.in_flight
+
+        runner_metrics = self.runner.get_metrics()
+        runner_metrics.update(
+            {
+                "connected_streams": connected,
+                "queues": {
+                    "raw_depth": raw_queue_depth,
+                    "encoded_depth": encoded_queue_depth,
+                    "turn_detection_depth": td_queue_depth,
+                    "raw_streams": raw_queue_streams,
+                    "encoded_streams": encoded_queue_streams,
+                    "turn_detection_streams": td_queue_streams,
+                },
+                "in_flight": in_flight,
+            }
+        )
+        return runner_metrics

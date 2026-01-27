@@ -7,6 +7,7 @@ import torch
 
 from parakeet.modules.cache import StreamingState
 from parakeet.engine.sequence import Sequence, SequenceStatus
+from parakeet.kernels.packing import pack_states_triton, unpack_states_triton
 
 
 @dataclass
@@ -67,6 +68,10 @@ class Scheduler:
     def active_sequences(self) -> Iterable[Sequence]:
         with self._lock:
             return list(self.active)
+
+    def counts(self) -> dict[str, int]:
+        with self._lock:
+            return {"active": len(self.active), "waiting": len(self.waiting)}
 
     def init_state_pool(
         self,
@@ -151,24 +156,27 @@ class Scheduler:
             slot_index,
             out=batch_state.cache_lengths,
         )
-        torch.index_select(
-            self._pool_state.cache.attn_k,
-            0,
-            slot_index,
-            out=batch_state.cache.attn_k,
-        )
-        torch.index_select(
-            self._pool_state.cache.attn_v,
-            0,
-            slot_index,
-            out=batch_state.cache.attn_v,
-        )
-        torch.index_select(
-            self._pool_state.cache.conv,
-            0,
-            slot_index,
-            out=batch_state.cache.conv,
-        )
+
+        triton_stats = pack_states_triton(self._pool_state, batch_state, slot_index)
+        if not triton_stats.used_triton:
+            torch.index_select(
+                self._pool_state.cache.attn_k,
+                0,
+                slot_index,
+                out=batch_state.cache.attn_k,
+            )
+            torch.index_select(
+                self._pool_state.cache.attn_v,
+                0,
+                slot_index,
+                out=batch_state.cache.attn_v,
+            )
+            torch.index_select(
+                self._pool_state.cache.conv,
+                0,
+                slot_index,
+                out=batch_state.cache.conv,
+            )
 
         return batch_state, slot_index
 
@@ -187,18 +195,20 @@ class Scheduler:
             slot_index,
             batch_state.cache_lengths,
         )
-        self._pool_state.cache.attn_k.index_copy_(
-            0,
-            slot_index,
-            batch_state.cache.attn_k,
-        )
-        self._pool_state.cache.attn_v.index_copy_(
-            0,
-            slot_index,
-            batch_state.cache.attn_v,
-        )
-        self._pool_state.cache.conv.index_copy_(
-            0,
-            slot_index,
-            batch_state.cache.conv,
-        )
+        triton_stats = unpack_states_triton(self._pool_state, batch_state, slot_index)
+        if not triton_stats.used_triton:
+            self._pool_state.cache.attn_k.index_copy_(
+                0,
+                slot_index,
+                batch_state.cache.attn_k,
+            )
+            self._pool_state.cache.attn_v.index_copy_(
+                0,
+                slot_index,
+                batch_state.cache.attn_v,
+            )
+            self._pool_state.cache.conv.index_copy_(
+                0,
+                slot_index,
+                batch_state.cache.conv,
+            )

@@ -12,6 +12,7 @@ import trio
 from parakeet.config import Config
 from parakeet.engine.asr_engine import ASREngine
 from parakeet.engine.scheduler import StreamResult
+from parakeet.kernels.packing import triton_pack_status
 from trio_websocket import ConnectionClosed, serve_websocket
 
 
@@ -41,6 +42,11 @@ class ASRSocketServer:
         self.engine = ASREngine(config, device=device)
         self._conn_lock = trio.Lock()
         self._active_streams: set[int] = set()
+        triton_enabled, reason = triton_pack_status(device)
+        if triton_enabled:
+            logging.info("State pack/unpack: Triton enabled")
+        else:
+            logging.info("State pack/unpack: eager torch (%s)", reason)
 
     async def serve(self) -> None:
         logging.info("Started TCP server on %s:%s", self.host, self.tcp_port)
@@ -385,7 +391,10 @@ class ASRSocketServer:
     async def _status_payload(self) -> dict[str, Any]:
         async with self._conn_lock:
             active = len(self._active_streams)
-        return {"type": "status", "connected_streams": active}
+        payload = self.engine.get_metrics()
+        payload["type"] = "status"
+        payload["connected_streams"] = active
+        return payload
 
     async def _register_stream(self, stream_id: int) -> None:
         async with self._conn_lock:

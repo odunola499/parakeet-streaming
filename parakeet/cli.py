@@ -4,6 +4,7 @@ import logging
 import trio
 
 from parakeet.config import Config
+from parakeet.profiler import add_profile_args, run_profile
 from parakeet.server import ASRSocketServer
 
 
@@ -30,6 +31,11 @@ def _build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--max-num-streams", type=int, default=100)
     serve.add_argument("--sample-rate", type=int, default=16000)
     serve.add_argument("--max-stream-seconds", type=int, default=300)
+
+    profile = subparsers.add_parser(
+        "profile", help="Run a short profiling pass and export a Chrome trace."
+    )
+    add_profile_args(profile)
     return parser
 
 
@@ -84,6 +90,8 @@ def main() -> None:
 
     if args.command == "serve":
         trio.run(_serve_async, args)
+    if args.command == "profile":
+        run_profile(args)
 
 
 if __name__ == "__main__":

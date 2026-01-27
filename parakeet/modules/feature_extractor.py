@@ -55,24 +55,46 @@ class FeatureExtractor:
             norm=mel_norm,
         ).astype(np.float32)
         self.fb = torch.from_numpy(fb)
+        self._window_cache: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
+        self._fb_cache: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
 
     def _get_seq_len(self, seq_len: int) -> int:
         pad_amount = self.n_fft
         return (seq_len + pad_amount - self.n_fft) // self.hop_length
 
-    def _compute_features(self, waveform: np.ndarray):
-        x = torch.from_numpy(waveform).unsqueeze(0)
+    def _get_window(self, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        key = (device, dtype)
+        window = self._window_cache.get(key)
+        if window is None:
+            window = self.window.to(device=device, dtype=dtype)
+            self._window_cache[key] = window
+        return window
+
+    def _get_fb(self, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        key = (device, dtype)
+        fb = self._fb_cache.get(key)
+        if fb is None:
+            fb = self.fb.to(device=device, dtype=dtype)
+            self._fb_cache[key] = fb
+        return fb
+
+    def _compute_features_tensor(self, x: torch.Tensor) -> torch.Tensor:
+        if x.dim() == 1:
+            x = x.unsqueeze(0)
+        if x.dtype != torch.float32:
+            x = x.float()
 
         x = x + torch.randn_like(x) * self.dither
         right = x[:, 1:] - self.preemph * x[:, :-1]
         x = torch.cat((x[:, :1], right), dim=-1)
 
+        window = self._get_window(x.device, torch.float32)
         stft = torch.stft(
             x,
             n_fft=self.n_fft,
             hop_length=self.hop_length,
             win_length=self.win_length,
-            window=self.window.to(dtype=torch.float32),
+            window=window,
             center=True,
             return_complex=True,
             pad_mode="constant",
@@ -82,10 +104,18 @@ class FeatureExtractor:
         spec = torch.sqrt(spec.pow(2).sum(-1))
         spec = spec.pow(self.mag_power)
 
-        mel = torch.matmul(self.fb.to(dtype=spec.dtype), spec)
+        fb = self._get_fb(spec.device, spec.dtype)
+        mel = torch.matmul(fb, spec)
         mel = torch.log(mel + self.log_zero_guard_value)
 
         return mel
+
+    def _compute_features(self, waveform: np.ndarray | torch.Tensor):
+        if isinstance(waveform, np.ndarray):
+            x = torch.from_numpy(waveform)
+        else:
+            x = waveform
+        return self._compute_features_tensor(x)
 
     def __call__(self, audio, return_tensors: str | None = None, padding: bool = True):
         assert isinstance(audio, np.ndarray)
@@ -104,21 +134,22 @@ class FeatureExtractor:
             return None
 
         total_samples = state._fe_sample_offset + state._fe_samples.size
-        hop = self.hop_length
         pad = self.n_fft // 2
-        offset_frames = state._fe_sample_offset // hop
+        offset_frames = state._fe_sample_offset // self.hop_length
 
         if final:
-            max_frame = total_samples // hop
+            max_frame = total_samples // self.hop_length
         else:
             if total_samples <= pad:
                 return None
-            max_frame = (total_samples - pad) // hop
+            max_frame = (total_samples - pad) // self.hop_length
 
         if state._fe_sample_offset == 0:
             min_frame = 0
         else:
-            min_frame = (state._fe_sample_offset + pad + hop - 1) // hop
+            min_frame = (
+                state._fe_sample_offset + pad + self.hop_length - 1
+            ) // self.hop_length
 
         start_frame = max(state._fe_emitted_frames, min_frame)
         if start_frame > max_frame:
@@ -131,6 +162,84 @@ class FeatureExtractor:
         state._fe_emitted_frames = max_frame + 1
         self._trim_samples(state)
         return new_feats
+
+    def batch_push(self, items, device: torch.device):
+        if not items:
+            return []
+
+        hop = self.hop_length
+        pad = self.n_fft // 2
+        results = [None for _ in items]
+        waveforms: list[np.ndarray] = []
+        meta: list[tuple[int, object, int, int, int]] = []
+
+        for idx, (state, samples, final) in enumerate(items):
+            if samples.size:
+                if state._fe_samples.size:
+                    state._fe_samples = np.concatenate([state._fe_samples, samples])
+                else:
+                    state._fe_samples = samples.copy()
+            else:
+                results[idx] = None
+                continue
+
+            total_samples = state._fe_sample_offset + state._fe_samples.size
+            if final:
+                max_frame = total_samples // hop
+            else:
+                if total_samples <= pad:
+                    results[idx] = None
+                    continue
+                max_frame = (total_samples - pad) // hop
+
+            if state._fe_sample_offset == 0:
+                min_frame = 0
+            else:
+                min_frame = (state._fe_sample_offset + pad + hop - 1) // hop
+
+            start_frame = max(state._fe_emitted_frames, min_frame)
+            if start_frame > max_frame:
+                results[idx] = None
+                continue
+
+            offset_frames = state._fe_sample_offset // hop
+            waveforms.append(state._fe_samples)
+            meta.append((idx, state, start_frame, max_frame, offset_frames))
+
+        if not waveforms:
+            return results
+
+        max_len = max(waveform.size for waveform in waveforms)
+        batch = torch.zeros(
+            (len(waveforms), max_len), device=device, dtype=torch.float32
+        )
+        for row, waveform in enumerate(waveforms):
+            wave_tensor = torch.from_numpy(waveform)
+            length = wave_tensor.numel()
+            batch[row, :length].copy_(wave_tensor)
+
+        features = self._compute_features_tensor(batch)
+
+        for batch_idx, (
+            out_idx,
+            state,
+            start_frame,
+            max_frame,
+            offset_frames,
+        ) in enumerate(meta):
+            start_idx = start_frame - offset_frames
+            end_idx = max_frame - offset_frames
+            if start_idx < 0:
+                start_idx = 0
+            if end_idx < start_idx:
+                results[out_idx] = None
+                continue
+            new_feats = features[batch_idx : batch_idx + 1, :, start_idx : end_idx + 1]
+            results[out_idx] = new_feats
+            state._fe_emitted_frames = max_frame + 1
+            self._trim_samples(state)
+
+        return results
 
     def _trim_samples(self, state) -> None:
         if state._fe_samples.size == 0:

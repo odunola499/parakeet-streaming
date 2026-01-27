@@ -10,7 +10,7 @@ import threading
 from parakeet.config import Config
 from parakeet.engine.asr_engine import ASREngine
 
-AUDIO_DIR = "/Users/odunolajenrola/Documents/GitHub/parakeet-streaming/audio"
+AUDIO_DIR = "audio"
 AUDIO_FILES = [os.path.join(AUDIO_DIR, i) for i in os.listdir(AUDIO_DIR)]
 
 

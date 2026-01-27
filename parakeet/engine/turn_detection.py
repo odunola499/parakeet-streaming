@@ -119,6 +119,12 @@ class TurnDetection:
         return vad_probs
 
     def infer_turn(self, array):
+        if array is None:
+            return {"prediction": 0, "probability": 0.0}
+        array = np.asarray(array, dtype=np.float32).reshape(-1)
+        if array.size == 0:
+            return {"prediction": 0, "probability": 0.0}
+
         inputs = self.feature_extractor(
             array,
             sampling_rate=self.sr,

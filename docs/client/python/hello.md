@@ -100,8 +100,11 @@ flow for a client connection. `status` is returned only by the status port.
 | server -> client | pong   | Response to `ping` |
 | status port -> client | status | One-shot connection count |
 
-`result` payloads include `text`, `token_ids`, `confidence_scores`, and `is_final`.
-`confidence_scores` align with the newly emitted `token_ids`.
+`result` payloads include `text`, `token_ids`, `confidence_scores`, `is_final`,
+`last_state`, and `turn_detection`. `confidence_scores` align with the newly emitted
+`token_ids`.
+`turn_detection` reports `start_of_utterance`, `running`, `pause`, or
+`end_of_utterance`, while `last_state` reports `speech`, `silence`, or `null`.
 
 ## Audio messages
 
