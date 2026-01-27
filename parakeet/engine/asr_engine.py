@@ -53,6 +53,7 @@ class ASREngine:
             if samples.size and not seq.td_queued:
                 seq.td_queued = True
                 notify_td = True
+        self.runner.queue_pre_encode(seq)
         if notify_td:
             self.runner.queue_turn_detection(seq)
 

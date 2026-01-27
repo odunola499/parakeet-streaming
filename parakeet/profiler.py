@@ -57,6 +57,17 @@ def _load_audios(
     return audios
 
 
+def _slice_audios(
+    audios: list[np.ndarray], sample_rate: int, duration: float
+) -> list[np.ndarray]:
+    if duration <= 0:
+        return [np.empty((0,), dtype=np.float32) for _ in audios]
+    length = int(duration * sample_rate)
+    if length <= 0:
+        return [np.empty((0,), dtype=np.float32) for _ in audios]
+    return [audio[:length] for audio in audios]
+
+
 def _feed_engine(
     stream_id: int, audio: np.ndarray, chunk_samples: int, engine: ASREngine
 ) -> None:
@@ -269,6 +280,24 @@ def run_profile(args: argparse.Namespace) -> None:
         max_num_streams=max(args.max_num_streams, args.num_streams),
         sample_rate=args.sample_rate,
         max_stream_seconds=max_stream_seconds,
+        dtype=getattr(args, "dtype", "fp32"),
+        shape_log_path=getattr(args, "shape_log", None),
+        cuda_graphs=getattr(args, "cuda_graphs", False),
+        cuda_graph_batch_sizes=tuple(
+            int(x)
+            for x in getattr(args, "cuda_graphs_batch_sizes", "1,2,4,8").split(",")
+            if x.strip()
+        ),
+        pre_encode_batch_size=getattr(args, "pre_encode_batch_size", 32),
+        encode_batch_size=getattr(args, "encode_batch_size", 32),
+        decode_batch_size=getattr(args, "decode_batch_size", 32),
+        paged_kv_cache=getattr(args, "paged_kv_cache", False),
+        paged_kv_page_size=getattr(args, "paged_kv_page_size", 16),
+        paged_kv_max_pages=(
+            None
+            if getattr(args, "paged_kv_max_pages", 0) <= 0
+            else getattr(args, "paged_kv_max_pages")
+        ),
     )
 
     print("Loading model...")
@@ -285,6 +314,37 @@ def run_profile(args: argparse.Namespace) -> None:
     activities = [ProfilerActivity.CPU]
     if device.type == "cuda":
         activities.append(ProfilerActivity.CUDA)
+
+    if args.warmup_seconds > 0:
+        warmup_audios = _slice_audios(
+            audios, args.sample_rate, args.warmup_seconds
+        )
+        if any(audio.size for audio in warmup_audios):
+            print("Running warmup pass...")
+            warmup_timeout = min(
+                args.timeout_seconds, max(args.warmup_seconds + 1.0, 1.0)
+            )
+            if args.single_thread:
+                _run_streams_single_thread(
+                    engine,
+                    warmup_audios,
+                    chunk_samples,
+                    False,
+                    args.poll_interval,
+                    warmup_timeout,
+                )
+            else:
+                _run_streams(
+                    engine,
+                    warmup_audios,
+                    chunk_samples,
+                    False,
+                    args.poll_interval,
+                    warmup_timeout,
+                )
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            engine.runner.reset_metrics()
 
     print("Running profiling pass...")
     run_start = time.monotonic()
@@ -356,17 +416,50 @@ def run_profile(args: argparse.Namespace) -> None:
 def add_profile_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--model-size", choices=("small", "large"), default="small")
-    parser.add_argument("--num-streams", type=int, default=1)
-    parser.add_argument("--max-num-streams", type=int, default=1)
+    parser.add_argument(
+        "--dtype",
+        choices=("fp32", "fp16", "bf16"),
+        default="fp32",
+        help="Model compute dtype.",
+    )
+    parser.add_argument(
+        "--shape-log",
+        default=None,
+        help="Optional path to write unique tensor shape observations.",
+    )
+    parser.add_argument(
+        "--cuda-graphs",
+        action="store_true",
+        help="Enable CUDA graphs for encoder (fixed batch sizes).",
+    )
+    parser.add_argument(
+        "--cuda-graphs-batch-sizes",
+        default="1,2,4,8",
+        help="Comma-separated batch sizes for CUDA graphs (e.g. 1,2,4).",
+    )
+    parser.add_argument("--num-streams", type=int, default=10)
+    parser.add_argument("--max-num-streams", type=int, default=15)
     parser.add_argument("--audio", nargs="*")
     parser.add_argument("--duration", type=float, default=5.0)
     parser.add_argument("--sample-rate", type=int, default=16000)
     parser.add_argument("--chunk-seconds", type=float, default=0.25)
     parser.add_argument("--poll-interval", type=float, default=0.01)
     parser.add_argument("--timeout-seconds", type=float, default=30.0)
+    parser.add_argument("--pre-encode-batch-size", type=int, default=32)
+    parser.add_argument("--encode-batch-size", type=int, default=32)
+    parser.add_argument("--decode-batch-size", type=int, default=32)
+    parser.add_argument("--paged-kv-cache", action="store_true")
+    parser.add_argument("--paged-kv-page-size", type=int, default=16)
+    parser.add_argument("--paged-kv-max-pages", type=int, default=0)
     parser.add_argument("--trace-path", default="traces/parakeet_profile.json")
     parser.add_argument("--top", type=int, default=20)
     parser.add_argument("--show-text", action="store_true")
+    parser.add_argument(
+        "--warmup-seconds",
+        type=float,
+        default=1.0,
+        help="Run a short warmup pass before profiling (0 to disable).",
+    )
     parser.add_argument("--max-stream-seconds", type=int)
     parser.add_argument(
         "--single-thread",

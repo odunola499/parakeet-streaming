@@ -57,6 +57,10 @@ class Sequence:
         self._fe_samples = np.empty((0,), dtype=np.float32)
         self._fe_emitted_frames = 0
         self._fe_sample_offset = 0
+        self._fe_buffer: np.ndarray | None = None
+        self._fe_buf_capacity = 0
+        self._fe_buf_start = 0
+        self._fe_buf_len = 0
 
         # Turn Detection / VAD
         self.last_state: Literal["silence", "speech", None] = None
@@ -74,6 +78,9 @@ class Sequence:
         self.last_emitted_turn_position: Literal[
             "start_of_utterance", "running", "pause", "end_of_utterance", None
         ] = None
+        self.pre_encode_queued = False
+        self.encode_queued = False
+        self.decode_queued = False
 
         self.token_ids: list[int] = []
         self.confidence_scores: list[float] = []
@@ -215,8 +222,15 @@ class Sequence:
         self._fe_samples = np.empty((0,), dtype=np.float32)
         self._fe_emitted_frames = 0
         self._fe_sample_offset = 0
+        self._fe_buffer = None
+        self._fe_buf_capacity = 0
+        self._fe_buf_start = 0
+        self._fe_buf_len = 0
 
         self.td_array = None
         self.vad_buf = None
         self.td_queued = False
+        self.pre_encode_queued = False
+        self.encode_queued = False
+        self.decode_queued = False
         self.last_emitted_turn_position = None

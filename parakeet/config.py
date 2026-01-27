@@ -37,6 +37,16 @@ class Config:
     max_num_streams: int = 100
     sample_rate: int = 16000
     max_stream_seconds: int = 300
+    dtype: Literal["fp32", "fp16", "bf16"] = "fp32"
+    shape_log_path: str | None = None
+    cuda_graphs: bool = False
+    cuda_graph_batch_sizes: tuple[int, ...] = (1, 2, 4, 8)
+    pre_encode_batch_size: int = 32
+    encode_batch_size: int = 32
+    decode_batch_size: int = 32
+    paged_kv_cache: bool = False
+    paged_kv_page_size: int = 16
+    paged_kv_max_pages: int | None = None
 
     def __post_init__(self):
         if self.size == "small":

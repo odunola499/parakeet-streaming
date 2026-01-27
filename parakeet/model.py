@@ -105,7 +105,11 @@ class Parakeet(nn.Module, GenerationMixin):
         raise NotImplementedError
 
     @classmethod
-    def from_pretrained(cls, size: Literal["small", "large"] = "small"):
+    def from_pretrained(
+        cls,
+        size: Literal["small", "large"] = "small",
+        dtype: torch.dtype | None = None,
+    ):
         config = CONFIG_MAP[size]()
 
         repo_id = WEIGHTS_MAP[size]
@@ -120,6 +124,8 @@ class Parakeet(nn.Module, GenerationMixin):
         model = cls(config)
         state_dict = remap_weights(state_dict)
         model.load_state_dict(state_dict)
+        if dtype is not None:
+            model = model.to(dtype=dtype)
         model._feature_extractor = FeatureExtractor()
         model._tokenizer = Tokenizer(tokenizer_path)
 
